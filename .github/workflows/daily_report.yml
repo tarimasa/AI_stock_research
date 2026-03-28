@@ -1,0 +1,31 @@
+name: Daily Stock AI Report
+
+on:
+  schedule:
+    - cron: '30 22 * * 0-4'  # 07:30 JST（8:30 発注向け）※日〜木 = 月〜金
+    - cron: '30 02 * * 1-5'  # 11:30 JST（12:00 発注向け）※月〜金
+  workflow_dispatch:           # 手動実行も可能
+
+jobs:
+  run-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run AI stock report
+        run: python src/main.py
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+          LIFF_URL: ${{ secrets.LIFF_URL }}
+          DRY_RUN: 'false'
+          MAX_STOCKS_TO_ANALYZE: '10'

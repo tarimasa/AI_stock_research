@@ -1,0 +1,11 @@
+anthropic>=0.40.0
+yfinance>=0.2.40
+pandas_ta>=0.3.14b
+feedparser>=6.0.11
+requests>=2.32.0
+python-dotenv>=1.0.0
+pytz>=2024.1
+fastapi>=0.115.0
+uvicorn>=0.32.0
+line-bot-sdk>=3.14.0
+azure-storage-blob>=12.23.0
