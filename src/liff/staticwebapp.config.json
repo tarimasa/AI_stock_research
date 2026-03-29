@@ -1,0 +1,10 @@
+{
+  "navigationFallback": {
+    "rewrite": "/index.html",
+    "exclude": ["*.css", "*.js", "*.json"]
+  },
+  "globalHeaders": {
+    "X-Frame-Options": "SAMEORIGIN",
+    "X-Content-Type-Options": "nosniff"
+  }
+}
