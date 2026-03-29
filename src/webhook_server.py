@@ -39,13 +39,20 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 # LIFF からのリクエストを許可するオリジン（デプロイ先URLに変更）
 LIFF_ORIGIN = os.environ.get("LIFF_ORIGIN", "https://liff.line.me")
 
-# 起動時に必須環境変数を検証
-if not LINE_CHANNEL_SECRET:
-    raise RuntimeError("LINE_CHANNEL_SECRET が設定されていません")
-if not LINE_CHANNEL_ACCESS_TOKEN:
-    raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が設定されていません")
 
-app = FastAPI(title="AI株式リサーチBot Webhook")
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 起動時に必須環境変数を検証（テスト時の import では実行されない）
+    if not LINE_CHANNEL_SECRET:
+        raise RuntimeError("LINE_CHANNEL_SECRET が設定されていません")
+    if not LINE_CHANNEL_ACCESS_TOKEN:
+        raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が設定されていません")
+    yield
+
+
+app = FastAPI(title="AI株式リサーチBot Webhook", lifespan=lifespan)
 
 # CORS: LIFF オリジンのみ許可
 app.add_middleware(
