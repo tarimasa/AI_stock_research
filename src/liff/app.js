@@ -60,11 +60,17 @@ function validateForm(action, code, shares, price) {
 }
 
 async function submitPortfolio(payload) {
+  // LIFF アクセストークンをヘッダーで送りサーバー側で検証してもらう
+  // user_id はクライアント側から送らない（サーバーでトークン検証済み IDを使用）
+  const accessToken = liff.getAccessToken();
+  if (!accessToken) {
+    throw new Error("LIFFアクセストークンが取得できません。再ログインしてください。");
+  }
   const resp = await fetch(`${WEBHOOK_BASE_URL}/portfolio`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-Line-User-Id": liffUserId || "",
+      "Authorization": `Bearer ${accessToken}`,
     },
     body: JSON.stringify(payload),
   });
@@ -108,7 +114,7 @@ document.getElementById("portfolioForm").addEventListener("submit", async functi
 
   if (!validateForm(action, code, shares, price)) return;
 
-  const payload = { action, user_id: liffUserId };
+  const payload = { action };
   if (action !== "list") {
     payload.code = code;
   }

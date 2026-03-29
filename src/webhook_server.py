@@ -8,9 +8,12 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Literal
 
+import requests as _requests
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -21,7 +24,7 @@ from linebot.v3.messaging import (
     TextMessage,
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -33,8 +36,24 @@ import portfolio_store
 
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
+# LIFF からのリクエストを許可するオリジン（デプロイ先URLに変更）
+LIFF_ORIGIN = os.environ.get("LIFF_ORIGIN", "https://liff.line.me")
+
+# 起動時に必須環境変数を検証
+if not LINE_CHANNEL_SECRET:
+    raise RuntimeError("LINE_CHANNEL_SECRET が設定されていません")
+if not LINE_CHANNEL_ACCESS_TOKEN:
+    raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が設定されていません")
 
 app = FastAPI(title="AI株式リサーチBot Webhook")
+
+# CORS: LIFF オリジンのみ許可
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[LIFF_ORIGIN],
+    allow_methods=["POST"],
+    allow_headers=["Content-Type", "Authorization"],
+)
 
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
@@ -243,15 +262,43 @@ def handle_text_message(event: MessageEvent):
 # ─────────────────────────────────────────
 
 class PortfolioRequest(BaseModel):
-    action: str          # "add" | "remove" | "list"
-    user_id: str | None = None
-    code: str | None = None
-    shares: int | None = None
-    price: int | None = None
+    action: Literal["add", "remove", "list"]   # 列挙型で不正アクションを拒否
+    code: str | None = Field(default=None, pattern=r"^\d{4}$")  # 4桁数字のみ
+    shares: int | None = Field(default=None, ge=1, le=100_000)  # 上限10万株
+    price: int | None = Field(default=None, ge=1, le=100_000_000)  # 上限1億円
+
+
+def _verify_liff_token(access_token: str) -> str:
+    """
+    LIFF アクセストークンを LINE API で検証し、ユーザー ID を返す。
+    検証失敗時は HTTPException(401) を送出する。
+    """
+    resp = _requests.get(
+        "https://api.line.me/oauth2/v2.1/verify",
+        params={"access_token": access_token},
+        timeout=5,
+    )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid LIFF access token")
+    data = resp.json()
+    # client_id がチャンネル ID と一致するか確認（オプショナルだが推奨）
+    user_id = data.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID not found in token")
+    return user_id
 
 
 @app.post("/portfolio")
-async def portfolio_endpoint(payload: PortfolioRequest):
+async def portfolio_endpoint(
+    payload: PortfolioRequest,
+    authorization: str | None = Header(default=None),
+):
+    # LIFF アクセストークンをサーバー側で検証してユーザー ID を取得
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authorization header required")
+    liff_token = authorization.removeprefix("Bearer ")
+    verified_user_id = _verify_liff_token(liff_token)
+
     cmd: dict = {"action": payload.action}
     if payload.code:
         code = payload.code.strip()
@@ -263,17 +310,14 @@ async def portfolio_endpoint(payload: PortfolioRequest):
 
     try:
         reply_text = execute_command(cmd)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Internal server error")
 
     # LINE Push で結果を通知
-    if payload.user_id:
-        try:
-            line_notifier.push_message(
-                [{"type": "text", "text": reply_text}]
-            )
-        except Exception:
-            pass
+    try:
+        line_notifier.push_message([{"type": "text", "text": reply_text}])
+    except Exception:
+        pass
 
     return {"status": "ok", "message": reply_text}
 
