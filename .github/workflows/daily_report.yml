@@ -2,13 +2,20 @@ name: Daily Stock AI Report
 
 on:
   schedule:
-    - cron: '30 22 * * 0-4'  # 07:30 JST（8:30 発注向け）※日〜木 = 月〜金
-    - cron: '30 02 * * 1-5'  # 11:30 JST（12:00 発注向け）※月〜金
+    - cron: '0 22 * * 0-4'   # 07:00 JST（8:30 発注向け）※日〜木 = 月〜金
+    - cron: '0 2 * * 1-5'    # 11:00 JST（12:00 発注向け）※月〜金
   workflow_dispatch:           # 手動実行も可能
+
+concurrency:
+  group: daily-stock-report
+  cancel-in-progress: false
 
 jobs:
   run-report:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
