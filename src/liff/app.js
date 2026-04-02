@@ -152,7 +152,6 @@ document.getElementById("portfolioForm").addEventListener("submit", async functi
 
 function showHoldingsList(data) {
   document.getElementById("portfolioForm").style.display = "none";
-  const resultArea = document.getElementById("resultArea");
 
   const totalColor = data.total_pnl >= 0 ? "profit" : "loss";
   const totalSign = data.total_pnl >= 0 ? "+" : "";
@@ -160,10 +159,12 @@ function showHoldingsList(data) {
   let html = `
     <div class="list-header">
       <div class="list-title">📦 保有株一覧（${data.count}銘柄）</div>
-      <div class="list-updated">取得: ${data.fetched_at}</div>
+      <div class="list-updated">🕐 取得: ${data.fetched_at}</div>
     </div>
     <div class="list-total ${totalColor}">
-      合計評価損益: ${totalSign}${data.total_pnl.toLocaleString()}円（${totalSign}${data.total_pnl_pct}%）
+      合計評価損益<br>
+      <span class="total-amount">${totalSign}${data.total_pnl.toLocaleString()}円</span>
+      <span class="total-pct">（${totalSign}${data.total_pnl_pct}%）</span>
     </div>
   `;
 
@@ -173,28 +174,47 @@ function showHoldingsList(data) {
     const dot = isProfit ? "🟢" : "🔴";
     const sign = isProfit ? "+" : "";
 
-    let targetHtml = "";
-    if (h.target_price) {
-      const rem = h.target_remaining_pct;
-      const remText = rem !== null
-        ? (rem >= 0 ? `あと+${rem}%` : `超過${Math.abs(rem)}%`)
-        : "";
-      targetHtml = `<div class="holding-target">🎯 目標: ¥${h.target_price.toLocaleString()} ${remText}</div>`;
-    }
+    // 目標までの残り
+    const rem = h.target_remaining_pct;
+    const remText = rem !== null
+      ? (rem >= 0 ? `あと ${rem}%` : `超過 ${Math.abs(rem)}%`)
+      : "";
 
     html += `
       <div class="holding-card">
+
+        <!-- 銘柄名 -->
         <div class="holding-header">
           <span class="holding-code">${h.code}</span>
           <span class="holding-name">${h.name}</span>
         </div>
-        <div class="holding-price-row">
-          <span class="holding-detail">${h.shares}株 ¥${h.current_price.toLocaleString()}</span>
-          <span class="holding-pnl ${pnlClass}">${sign}${h.pnl_pct}% ${dot}</span>
+
+        <!-- 現在値・損益 -->
+        <div class="price-block">
+          <div class="price-label">現在値</div>
+          <div class="price-main">¥${h.current_price.toLocaleString()}</div>
+          <div class="price-sub ${pnlClass}">
+            ${sign}${h.pnl_pct}% ${dot} &nbsp; ${sign}${h.pnl.toLocaleString()}円
+          </div>
+          <div class="price-sub muted">${h.shares}株保有 &nbsp; 取得: ¥${h.buy_price.toLocaleString()}</div>
         </div>
-        <div class="holding-pnl-abs ${pnlClass}">${sign}${h.pnl.toLocaleString()}円</div>
-        ${targetHtml}
-        <div class="holding-stoploss">🛡 損切ライン: ${h.stop_loss_pct}%</div>
+
+        <!-- 注文ガイド -->
+        <div class="order-guide">
+          <div class="order-guide-title">📋 注文ガイド</div>
+          <div class="order-row take-profit">
+            <div class="order-type">📈 利確売り（指値）</div>
+            <div class="order-price">¥${h.target_price.toLocaleString()}</div>
+            <div class="order-note">${remText}</div>
+          </div>
+          <div class="order-row stop-loss">
+            <div class="order-type">🛑 損切り（逆指値）</div>
+            <div class="order-price">¥${h.stop_loss_price.toLocaleString()}</div>
+            <div class="order-note">${h.stop_loss_pct}%ライン</div>
+          </div>
+        </div>
+
+        <!-- 考察 -->
         <div class="holding-insight">${h.insight}</div>
       </div>
     `;
@@ -202,7 +222,7 @@ function showHoldingsList(data) {
 
   document.getElementById("resultMsg").innerHTML = html;
   document.getElementById("resultMsg").className = "result-msg list";
-  resultArea.style.display = "block";
+  document.getElementById("resultArea").style.display = "block";
 }
 
 // 戻るボタン

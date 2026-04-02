@@ -344,6 +344,12 @@ def _build_list_data(portfolio: dict) -> dict:
         if target_price:
             target_remaining_pct = round((target_price - current) / current * 100, 1)
 
+        # 損切り・利確の円建て価格を計算
+        stop_loss_price = round(h["buy_price"] * (1 + stop_loss_pct / 100))
+        take_profit_price = target_price if target_price else round(
+            h["buy_price"] * (1 + default_alerts.get("profit_pct", 15) / 100)
+        )
+
         items.append({
             "code": h["code"].replace(".T", ""),
             "name": h["name"],
@@ -352,8 +358,9 @@ def _build_list_data(portfolio: dict) -> dict:
             "current_price": round(current),
             "pnl": round(pnl),
             "pnl_pct": round(pnl_pct, 1),
-            "target_price": target_price,
+            "target_price": take_profit_price,
             "target_remaining_pct": target_remaining_pct,
+            "stop_loss_price": stop_loss_price,
             "stop_loss_pct": stop_loss_pct,
             "insight": _generate_insight(pnl_pct, target_price, current, stop_loss_pct),
         })

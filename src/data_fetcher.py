@@ -45,6 +45,29 @@ def _calc_rsi(series: pd.Series, period: int = 14) -> float:
     return float(rsi.iloc[-1]) if not rsi.empty else 50.0
 
 
+def fetch_current_price(ticker: str) -> float:
+    """
+    リアルタイム（または直近）株価を取得する。
+    fast_info → 1分足 → 日足 の順にフォールバックする。
+    """
+    t = yf.Ticker(ticker)
+    try:
+        price = t.fast_info.last_price
+        if price and float(price) > 0:
+            return float(price)
+    except Exception:
+        pass
+    try:
+        df = t.history(period="1d", interval="1m")
+        if not df.empty:
+            return float(df["Close"].iloc[-1])
+    except Exception:
+        pass
+    # 最終フォールバック: 日足
+    df = fetch_ohlcv(ticker, days=5)
+    return float(df["Close"].iloc[-1]) if not df.empty else 0.0
+
+
 def fetch_stock_data(ticker: str) -> dict:
     """
     Returns:
@@ -73,8 +96,11 @@ def fetch_stock_data(ticker: str) -> dict:
         return {"code": ticker, "error": "no data"}
 
     close = df["Close"]
-    current_price = float(close.iloc[-1])
-    prev_price = float(close.iloc[-2]) if len(close) >= 2 else current_price
+    # リアルタイム価格を優先、取れなければ日足終値
+    current_price = fetch_current_price(ticker)
+    if current_price <= 0:
+        current_price = float(close.iloc[-1])
+    prev_price = float(close.iloc[-1])  # 日足直近終値を前日比の基準に使う
     change_pct = (current_price - prev_price) / prev_price * 100
 
     rsi_14 = _calc_rsi(close, 14)
