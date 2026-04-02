@@ -137,8 +137,11 @@ document.getElementById("portfolioForm").addEventListener("submit", async functi
 
   try {
     const data = await submitPortfolio(payload);
-    const message = data.message || "完了しました。";
-    showResult(message, action === "list" ? "list" : "success");
+    if (action === "list" && data.holdings_data) {
+      showHoldingsList(data.holdings_data);
+    } else {
+      showResult(data.message || "完了しました。", "success");
+    }
   } catch (err) {
     showError(err.message || "送信に失敗しました。もう一度お試しください。");
     submitBtn.disabled = false;
@@ -146,6 +149,61 @@ document.getElementById("portfolioForm").addEventListener("submit", async functi
                             action === "remove" ? "🗑️ 削除する" : "✅ 登録する";
   }
 });
+
+function showHoldingsList(data) {
+  document.getElementById("portfolioForm").style.display = "none";
+  const resultArea = document.getElementById("resultArea");
+
+  const totalColor = data.total_pnl >= 0 ? "profit" : "loss";
+  const totalSign = data.total_pnl >= 0 ? "+" : "";
+
+  let html = `
+    <div class="list-header">
+      <div class="list-title">📦 保有株一覧（${data.count}銘柄）</div>
+      <div class="list-updated">取得: ${data.fetched_at}</div>
+    </div>
+    <div class="list-total ${totalColor}">
+      合計評価損益: ${totalSign}${data.total_pnl.toLocaleString()}円（${totalSign}${data.total_pnl_pct}%）
+    </div>
+  `;
+
+  for (const h of data.holdings) {
+    const isProfit = h.pnl_pct >= 0;
+    const pnlClass = isProfit ? "profit" : "loss";
+    const dot = isProfit ? "🟢" : "🔴";
+    const sign = isProfit ? "+" : "";
+
+    let targetHtml = "";
+    if (h.target_price) {
+      const rem = h.target_remaining_pct;
+      const remText = rem !== null
+        ? (rem >= 0 ? `あと+${rem}%` : `超過${Math.abs(rem)}%`)
+        : "";
+      targetHtml = `<div class="holding-target">🎯 目標: ¥${h.target_price.toLocaleString()} ${remText}</div>`;
+    }
+
+    html += `
+      <div class="holding-card">
+        <div class="holding-header">
+          <span class="holding-code">${h.code}</span>
+          <span class="holding-name">${h.name}</span>
+        </div>
+        <div class="holding-price-row">
+          <span class="holding-detail">${h.shares}株 ¥${h.current_price.toLocaleString()}</span>
+          <span class="holding-pnl ${pnlClass}">${sign}${h.pnl_pct}% ${dot}</span>
+        </div>
+        <div class="holding-pnl-abs ${pnlClass}">${sign}${h.pnl.toLocaleString()}円</div>
+        ${targetHtml}
+        <div class="holding-stoploss">🛡 損切ライン: ${h.stop_loss_pct}%</div>
+        <div class="holding-insight">${h.insight}</div>
+      </div>
+    `;
+  }
+
+  document.getElementById("resultMsg").innerHTML = html;
+  document.getElementById("resultMsg").className = "result-msg list";
+  resultArea.style.display = "block";
+}
 
 // 戻るボタン
 document.getElementById("backBtn").addEventListener("click", function () {

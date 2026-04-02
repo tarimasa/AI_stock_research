@@ -293,6 +293,81 @@ def _verify_liff_token(access_token: str) -> str:
     return user_id
 
 
+def _generate_insight(pnl_pct: float, target_price: float | None,
+                      current_price: float, stop_loss_pct: float) -> str:
+    """保有株ごとの一言考察を生成する。"""
+    if pnl_pct <= stop_loss_pct:
+        return f"⚠️ 損切りライン（{stop_loss_pct:+.0f}%）到達。早急な対応を検討。"
+    if target_price and current_price >= target_price:
+        return "🎯 目標価格到達！利確を強く検討。"
+    if target_price:
+        remaining = (target_price - current_price) / current_price * 100
+        if remaining <= 3:
+            return f"🎯 目標価格まであと{remaining:.1f}%。利確タイミングに注意。"
+    if pnl_pct >= 15:
+        return "📈 好調な含み益。目標価格まで継続保有を検討。"
+    if pnl_pct >= 5:
+        return "✅ 含み益あり。引き続き保有を継続。"
+    if pnl_pct >= 0:
+        return "⚪ 小幅な含み益。様子見で問題なし。"
+    if pnl_pct >= -5:
+        return "🔶 小幅な含み損。損切りラインまで余裕あり。"
+    return f"🔴 含み損が拡大中。損切りライン（{stop_loss_pct:+.0f}%）に注意。"
+
+
+def _build_list_data(portfolio: dict) -> dict:
+    """一覧用の構造化データを生成する（LIFF カード表示用）。"""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    holdings = portfolio.get("holdings", [])
+    default_alerts = portfolio.get("default_alerts", {})
+    fetched_at = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M JST")
+
+    items = []
+    total_pnl = 0.0
+
+    for h in holdings:
+        try:
+            stock_data = data_fetcher.fetch_stock_data(h["code"])
+            current = float(stock_data.get("price", h["buy_price"]))
+        except Exception:
+            current = float(h["buy_price"])
+
+        pnl = (current - h["buy_price"]) * h["shares"]
+        pnl_pct = (current - h["buy_price"]) / h["buy_price"] * 100
+        total_pnl += pnl
+        stop_loss_pct = h.get("stop_loss_pct", default_alerts.get("loss_pct", -8))
+        target_price = h.get("target_price")
+
+        target_remaining_pct = None
+        if target_price:
+            target_remaining_pct = round((target_price - current) / current * 100, 1)
+
+        items.append({
+            "code": h["code"].replace(".T", ""),
+            "name": h["name"],
+            "shares": h["shares"],
+            "buy_price": h["buy_price"],
+            "current_price": round(current),
+            "pnl": round(pnl),
+            "pnl_pct": round(pnl_pct, 1),
+            "target_price": target_price,
+            "target_remaining_pct": target_remaining_pct,
+            "stop_loss_pct": stop_loss_pct,
+            "insight": _generate_insight(pnl_pct, target_price, current, stop_loss_pct),
+        })
+
+    total_buy = sum(h["buy_price"] * h["shares"] for h in holdings) or 1
+    return {
+        "fetched_at": fetched_at,
+        "count": len(items),
+        "total_pnl": round(total_pnl),
+        "total_pnl_pct": round(total_pnl / total_buy * 100, 1),
+        "holdings": items,
+    }
+
+
 @app.post("/portfolio")
 async def portfolio_endpoint(
     payload: PortfolioRequest,
@@ -326,7 +401,17 @@ async def portfolio_endpoint(
     except Exception:
         pass
 
-    return {"status": "ok", "message": reply_text}
+    response: dict = {"status": "ok", "message": reply_text}
+
+    # 一覧のときは LIFF カード表示用の構造化データも返す
+    if payload.action == "list":
+        try:
+            portfolio = portfolio_store.load_portfolio()
+            response["holdings_data"] = _build_list_data(portfolio)
+        except Exception as e:
+            print(f"[WARN] _build_list_data failed: {e}")
+
+    return response
 
 
 # ─────────────────────────────────────────
