@@ -1,0 +1,9 @@
+{
+  "default_alerts": {
+    "profit_pct": 15,
+    "loss_pct": -8,
+    "rsi_overbought": 70,
+    "rsi_oversold": 30
+  },
+  "holdings": []
+}
