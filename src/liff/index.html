@@ -11,13 +11,14 @@
     <h1>📈 保有株フォーム</h1>
     <hr />
 
+    <!-- フォーム -->
     <form id="portfolioForm">
       <div class="form-group">
         <label for="action">操作</label>
         <select id="action" name="action" required>
-          <option value="add">追加</option>
-          <option value="remove">削除</option>
-          <option value="list">一覧表示</option>
+          <option value="add">➕ 追加</option>
+          <option value="remove">🗑️ 削除</option>
+          <option value="list">📋 一覧表示</option>
         </select>
       </div>
 
@@ -30,6 +31,7 @@
           pattern="[0-9]{4}"
           placeholder="例: 7203"
           maxlength="4"
+          inputmode="numeric"
         />
         <span class="hint">東証4桁コードを入力してください</span>
       </div>
@@ -44,6 +46,7 @@
             min="1"
             step="1"
             placeholder="例: 100"
+            inputmode="numeric"
           />
         </div>
 
@@ -56,6 +59,7 @@
             min="1"
             step="1"
             placeholder="例: 2650"
+            inputmode="numeric"
           />
         </div>
       </div>
@@ -65,8 +69,13 @@
       <button type="submit" id="submitBtn">✅ 登録する</button>
     </form>
 
-    <div id="successMsg" class="success-msg" style="display:none;">
-      ✅ 送信完了しました。LINEトークに戻ります...
+    <!-- 結果表示エリア -->
+    <div id="resultArea" style="display:none;">
+      <div id="resultMsg" class="result-msg"></div>
+      <div class="result-buttons">
+        <button type="button" id="backBtn" class="btn-secondary">← 戻る</button>
+        <button type="button" id="closeBtn" class="btn-primary">LINEに戻る</button>
+      </div>
     </div>
   </div>
 

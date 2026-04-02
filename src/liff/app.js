@@ -1,7 +1,5 @@
 // app.js - LIFF SDK 初期化とフォーム送信処理
 
-// webhook_server の /portfolio エンドポイント URL
-// Azure Container Apps デプロイ後に実際の URL に変更してください
 const WEBHOOK_BASE_URL = "https://YOUR-CONTAINER-APP.japaneast.azurecontainerapps.io";
 
 let liffUserId = null;
@@ -22,7 +20,6 @@ async function initLiff() {
 }
 
 function getLiffId() {
-  // index.html の URL パラメータ liffId から取得するか、ハードコード
   const params = new URLSearchParams(window.location.search);
   return params.get("liffId") || "YOUR_LIFF_ID";
 }
@@ -35,6 +32,20 @@ function showError(msg) {
 
 function hideError() {
   document.getElementById("errorMsg").style.display = "none";
+}
+
+function showResult(message, type) {
+  document.getElementById("portfolioForm").style.display = "none";
+  const resultArea = document.getElementById("resultArea");
+  const resultMsg = document.getElementById("resultMsg");
+  resultMsg.textContent = message;
+  resultMsg.className = `result-msg ${type}`;
+  resultArea.style.display = "block";
+
+  // 追加・削除は3秒後に自動クローズ、一覧は手動クローズのみ
+  if (type === "success") {
+    setTimeout(() => liff.closeWindow(), 3000);
+  }
 }
 
 function validateForm(action, code, shares, price) {
@@ -60,8 +71,6 @@ function validateForm(action, code, shares, price) {
 }
 
 async function submitPortfolio(payload) {
-  // LIFF アクセストークンをヘッダーで送りサーバー側で検証してもらう
-  // user_id はクライアント側から送らない（サーバーでトークン検証済み IDを使用）
   const accessToken = liff.getAccessToken();
   if (!accessToken) {
     throw new Error("LIFFアクセストークンが取得できません。再ログインしてください。");
@@ -82,7 +91,7 @@ async function submitPortfolio(payload) {
   return resp.json();
 }
 
-// フォームの表示切り替え
+// 操作選択時のフォーム表示切り替え
 document.getElementById("action").addEventListener("change", function () {
   const addFields = document.getElementById("addFields");
   const codeGroup = document.getElementById("codeGroup");
@@ -103,6 +112,7 @@ document.getElementById("action").addEventListener("change", function () {
   }
 });
 
+// フォーム送信
 document.getElementById("portfolioForm").addEventListener("submit", async function (e) {
   e.preventDefault();
   hideError();
@@ -115,9 +125,7 @@ document.getElementById("portfolioForm").addEventListener("submit", async functi
   if (!validateForm(action, code, shares, price)) return;
 
   const payload = { action };
-  if (action !== "list") {
-    payload.code = code;
-  }
+  if (action !== "list") payload.code = code;
   if (action === "add") {
     payload.shares = parseInt(shares);
     payload.price = parseInt(price);
@@ -128,18 +136,29 @@ document.getElementById("portfolioForm").addEventListener("submit", async functi
   submitBtn.textContent = "送信中...";
 
   try {
-    await submitPortfolio(payload);
-    document.getElementById("portfolioForm").style.display = "none";
-    document.getElementById("successMsg").style.display = "block";
-    // 2 秒後に LIFF を閉じて LINE トークに戻る
-    setTimeout(() => {
-      liff.closeWindow();
-    }, 2000);
+    const data = await submitPortfolio(payload);
+    const message = data.message || "完了しました。";
+    showResult(message, action === "list" ? "list" : "success");
   } catch (err) {
     showError(err.message || "送信に失敗しました。もう一度お試しください。");
     submitBtn.disabled = false;
-    submitBtn.textContent = "✅ 登録する";
+    submitBtn.textContent = action === "list" ? "📋 一覧を表示" :
+                            action === "remove" ? "🗑️ 削除する" : "✅ 登録する";
   }
+});
+
+// 戻るボタン
+document.getElementById("backBtn").addEventListener("click", function () {
+  document.getElementById("resultArea").style.display = "none";
+  document.getElementById("portfolioForm").style.display = "block";
+  const submitBtn = document.getElementById("submitBtn");
+  submitBtn.disabled = false;
+  submitBtn.textContent = "✅ 登録する";
+});
+
+// LINEに戻るボタン
+document.getElementById("closeBtn").addEventListener("click", function () {
+  liff.closeWindow();
 });
 
 // 初期化
