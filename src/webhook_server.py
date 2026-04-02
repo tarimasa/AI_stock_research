@@ -315,8 +315,10 @@ async def portfolio_endpoint(
 
     try:
         reply_text = execute_command(cmd)
-    except Exception:
-        raise HTTPException(status_code=500, detail="Internal server error")
+    except Exception as e:
+        import traceback
+        print(f"[ERROR] execute_command failed: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {e}")
 
     # LINE Push で結果を通知
     try:
