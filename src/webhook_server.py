@@ -294,16 +294,45 @@ def _verify_liff_token(access_token: str) -> str:
 
 
 def _generate_insight(pnl_pct: float, target_price: float | None,
-                      current_price: float, stop_loss_pct: float) -> str:
-    """保有株ごとの一言考察を生成する。"""
+                      current_price: float, stop_loss_pct: float,
+                      rsi: float = 50.0, ma25_diff_pct: float = 0.0,
+                      macd: float = 0.0, macd_signal: float = 0.0) -> str:
+    """
+    RSI・MA乖離・MACDを組み合わせた考察を生成する。
+    screener.py と同じテクニカル指標を保有株の出口判断に応用する。
+    """
+    # ── 最優先: 損切りライン到達 ──
     if pnl_pct <= stop_loss_pct:
-        return f"⚠️ 損切りライン（{stop_loss_pct:+.0f}%）到達。早急な対応を検討。"
+        return f"⚠️ 損切りライン（{stop_loss_pct:+.0f}%）到達。早急な売り注文を。"
+
+    # ── 目標価格チェック ──
     if target_price and current_price >= target_price:
-        return "🎯 目標価格到達！利確を強く検討。"
+        extra = f" RSI{rsi:.0f}（過熱）も重なる。" if rsi >= 65 else ""
+        return f"🎯 目標価格到達！{extra}利確を強く検討。"
     if target_price:
         remaining = (target_price - current_price) / current_price * 100
         if remaining <= 3:
-            return f"🎯 目標価格まであと{remaining:.1f}%。利確タイミングに注意。"
+            rsi_note = f" RSI{rsi:.0f}（過熱圏）。" if rsi >= 65 else ""
+            return f"🎯 目標まであと{remaining:.1f}%。{rsi_note}利確タイミングに注意。"
+
+    # ── テクニカル複合シグナル（screenerロジック応用）──
+    # RSI 過熱 × 含み益: 利確検討
+    if rsi >= 70 and pnl_pct > 0:
+        return f"📈 RSI{rsi:.0f}（過熱圏）& 含み益{pnl_pct:+.1f}%。指値売り注文を検討。"
+    # RSI 過熱 × MA乖離大: 反落リスク高
+    if rsi >= 65 and ma25_diff_pct >= 8:
+        return f"⚡ RSI{rsi:.0f} & 25日線乖離+{ma25_diff_pct:.1f}%（過熱）。利確タイミング。"
+    # MACDデッドクロス × 含み益あり: 売り転換シグナル
+    if macd < macd_signal and macd_signal > 0 and pnl_pct > 0:
+        return f"🔻 MACDデッドクロス（売り転換）。含み益{pnl_pct:+.1f}%のうちに利確検討。"
+    # 25日線割れ × 含み損: 損切り接近
+    if ma25_diff_pct < -5 and pnl_pct < 0:
+        return f"🔴 25日線割れ（{ma25_diff_pct:.1f}%）& 含み損。損切りライン（{stop_loss_pct:+.0f}%）に注意。"
+    # RSI 売られすぎ: 底値圏、損切り判断を慎重に
+    if rsi <= 30 and pnl_pct < 0:
+        return f"🔵 RSI{rsi:.0f}（売られすぎ圏）。反発待ちか損切りか要判断。"
+
+    # ── 基本判断 ──
     if pnl_pct >= 15:
         return "📈 好調な含み益。目標価格まで継続保有を検討。"
     if pnl_pct >= 5:
@@ -331,8 +360,25 @@ def _build_list_data(portfolio: dict) -> dict:
         try:
             stock_data = data_fetcher.fetch_stock_data(h["code"])
             current = float(stock_data.get("price", h["buy_price"]))
+            rsi = float(stock_data.get("rsi_14", 50.0))
+            ma25_diff_pct = float(stock_data.get("ma25_diff_pct", 0.0))
         except Exception:
             current = float(h["buy_price"])
+            rsi = 50.0
+            ma25_diff_pct = 0.0
+
+        # MACD をスクリーナーと同じロジックで計算
+        macd, macd_signal = 0.0, 0.0
+        try:
+            import pandas_ta as ta
+            df = data_fetcher.fetch_ohlcv(h["code"], days=60)
+            if not df.empty:
+                df.ta.macd(append=True)
+                latest = df.iloc[-1]
+                macd = float(latest.get("MACD_12_26_9", 0) or 0)
+                macd_signal = float(latest.get("MACDs_12_26_9", 0) or 0)
+        except Exception:
+            pass
 
         pnl = (current - h["buy_price"]) * h["shares"]
         pnl_pct = (current - h["buy_price"]) / h["buy_price"] * 100
@@ -344,7 +390,6 @@ def _build_list_data(portfolio: dict) -> dict:
         if target_price:
             target_remaining_pct = round((target_price - current) / current * 100, 1)
 
-        # 損切り・利確の円建て価格を計算
         stop_loss_price = round(h["buy_price"] * (1 + stop_loss_pct / 100))
         take_profit_price = target_price if target_price else round(
             h["buy_price"] * (1 + default_alerts.get("profit_pct", 15) / 100)
@@ -362,7 +407,12 @@ def _build_list_data(portfolio: dict) -> dict:
             "target_remaining_pct": target_remaining_pct,
             "stop_loss_price": stop_loss_price,
             "stop_loss_pct": stop_loss_pct,
-            "insight": _generate_insight(pnl_pct, target_price, current, stop_loss_pct),
+            "rsi": round(rsi, 1),
+            "ma25_diff_pct": round(ma25_diff_pct, 1),
+            "insight": _generate_insight(
+                pnl_pct, target_price, current, stop_loss_pct,
+                rsi, ma25_diff_pct, macd, macd_signal
+            ),
         })
 
     total_buy = sum(h["buy_price"] * h["shares"] for h in holdings) or 1

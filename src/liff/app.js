@@ -24,6 +24,16 @@ function getLiffId() {
   return params.get("liffId") || "YOUR_LIFF_ID";
 }
 
+/** XSS対策: HTMLエスケープ */
+function esc(str) {
+  return String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function showError(msg) {
   const el = document.getElementById("errorMsg");
   el.textContent = msg;
@@ -91,17 +101,15 @@ async function submitPortfolio(payload) {
   return resp.json();
 }
 
-// 操作選択時のフォーム表示切り替え
-document.getElementById("action").addEventListener("change", function () {
+function updateFormLayout(action) {
   const addFields = document.getElementById("addFields");
   const codeGroup = document.getElementById("codeGroup");
   const submitBtn = document.getElementById("submitBtn");
-
-  if (this.value === "list") {
+  if (action === "list") {
     addFields.style.display = "none";
     codeGroup.style.display = "none";
     submitBtn.textContent = "📋 一覧を表示";
-  } else if (this.value === "remove") {
+  } else if (action === "remove") {
     addFields.style.display = "none";
     codeGroup.style.display = "block";
     submitBtn.textContent = "🗑️ 削除する";
@@ -110,6 +118,14 @@ document.getElementById("action").addEventListener("change", function () {
     codeGroup.style.display = "block";
     submitBtn.textContent = "✅ 登録する";
   }
+}
+
+// 初期状態を一覧モードに設定
+updateFormLayout("list");
+
+// 操作選択時のフォーム表示切り替え
+document.getElementById("action").addEventListener("change", function () {
+  updateFormLayout(this.value);
 });
 
 // フォーム送信
@@ -173,49 +189,40 @@ function showHoldingsList(data) {
     const pnlClass = isProfit ? "profit" : "loss";
     const dot = isProfit ? "🟢" : "🔴";
     const sign = isProfit ? "+" : "";
-
-    // 目標までの残り
     const rem = h.target_remaining_pct;
     const remText = rem !== null
-      ? (rem >= 0 ? `あと ${rem}%` : `超過 ${Math.abs(rem)}%`)
+      ? (rem >= 0 ? `あと${rem}%` : `超過${Math.abs(rem)}%`)
       : "";
+    const rsiText = h.rsi ? `RSI ${h.rsi}` : "";
 
     html += `
       <div class="holding-card">
-
-        <!-- 銘柄名 -->
         <div class="holding-header">
-          <span class="holding-code">${h.code}</span>
-          <span class="holding-name">${h.name}</span>
+          <span class="holding-code">${esc(h.code)}</span>
+          <span class="holding-name">${esc(h.name)}</span>
+          <span class="holding-rsi">${esc(rsiText)}</span>
         </div>
-
-        <!-- 現在値・損益 -->
         <div class="price-block">
-          <div class="price-label">現在値</div>
-          <div class="price-main">¥${h.current_price.toLocaleString()}</div>
-          <div class="price-sub ${pnlClass}">
-            ${sign}${h.pnl_pct}% ${dot} &nbsp; ${sign}${h.pnl.toLocaleString()}円
+          <div class="price-row">
+            <span class="price-label">現在値</span>
+            <span class="price-main">¥${h.current_price.toLocaleString()}</span>
+            <span class="price-pnl ${pnlClass}">${sign}${h.pnl_pct}% ${dot}</span>
           </div>
-          <div class="price-sub muted">${h.shares}株保有 &nbsp; 取得: ¥${h.buy_price.toLocaleString()}</div>
+          <div class="price-sub muted">${h.shares}株 取得¥${h.buy_price.toLocaleString()} &nbsp;損益 <span class="${pnlClass}">${sign}${h.pnl.toLocaleString()}円</span></div>
         </div>
-
-        <!-- 注文ガイド -->
         <div class="order-guide">
-          <div class="order-guide-title">📋 注文ガイド</div>
           <div class="order-row take-profit">
-            <div class="order-type">📈 利確売り（指値）</div>
-            <div class="order-price">¥${h.target_price.toLocaleString()}</div>
-            <div class="order-note">${remText}</div>
+            <span class="order-type">📈 利確売り指値</span>
+            <span class="order-price take">¥${h.target_price.toLocaleString()}</span>
+            <span class="order-note">${esc(remText)}</span>
           </div>
           <div class="order-row stop-loss">
-            <div class="order-type">🛑 損切り（逆指値）</div>
-            <div class="order-price">¥${h.stop_loss_price.toLocaleString()}</div>
-            <div class="order-note">${h.stop_loss_pct}%ライン</div>
+            <span class="order-type">🛑 損切り逆指値</span>
+            <span class="order-price stop">¥${h.stop_loss_price.toLocaleString()}</span>
+            <span class="order-note">${h.stop_loss_pct}%</span>
           </div>
         </div>
-
-        <!-- 考察 -->
-        <div class="holding-insight">${h.insight}</div>
+        <div class="holding-insight">${esc(h.insight)}</div>
       </div>
     `;
   }

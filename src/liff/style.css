@@ -219,130 +219,129 @@ button[type="submit"]:disabled {
 /* ── 銘柄カード ── */
 .holding-card {
   border: 1.5px solid #d0d7de;
-  border-radius: 14px;
-  margin-bottom: 12px;
+  border-radius: 12px;
+  margin-bottom: 8px;
   overflow: hidden;
 }
 
 /* 銘柄名行 */
 .holding-header {
   background: #1E3A5F;
-  padding: 10px 14px;
+  padding: 7px 12px;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .holding-code {
-  font-size: 1rem;
+  font-size: 0.95rem;
   font-weight: 800;
   color: #fff;
 }
 
 .holding-name {
-  font-size: 0.88rem;
+  font-size: 0.85rem;
   color: #bcd0e8;
   font-weight: 500;
+  flex: 1;
+}
+
+.holding-rsi {
+  font-size: 0.72rem;
+  color: #8fb0d4;
 }
 
 /* 現在値ブロック */
 .price-block {
-  padding: 12px 14px 10px;
+  padding: 7px 12px;
   border-bottom: 1px solid #e8ecf0;
 }
 
+.price-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
 .price-label {
-  font-size: 0.7rem;
+  font-size: 0.68rem;
   font-weight: 700;
   color: #999;
-  letter-spacing: 0.05em;
-  margin-bottom: 2px;
+  letter-spacing: 0.04em;
 }
 
 .price-main {
-  font-size: 1.6rem;
+  font-size: 1.35rem;
   font-weight: 800;
   color: #1a1a2e;
   line-height: 1.2;
 }
 
-.price-sub {
-  font-size: 0.85rem;
-  font-weight: 600;
-  margin-top: 3px;
+.price-pnl {
+  font-size: 0.9rem;
+  font-weight: 700;
 }
 
-.price-sub.muted { color: #888; font-weight: 400; }
+.price-sub {
+  font-size: 0.78rem;
+  margin-top: 1px;
+}
+
+.price-sub.muted { color: #888; }
 
 .profit { color: #1e8449; }
 .loss   { color: #c0392b; }
 
 /* 注文ガイド */
 .order-guide {
-  padding: 10px 14px;
+  padding: 5px 12px;
   background: #f8fafc;
   border-bottom: 1px solid #e8ecf0;
-}
-
-.order-guide-title {
-  font-size: 0.72rem;
-  font-weight: 700;
-  color: #666;
-  letter-spacing: 0.05em;
-  margin-bottom: 8px;
 }
 
 .order-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
-  border-radius: 8px;
-  margin-bottom: 6px;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  margin-bottom: 4px;
 }
 
 .order-row:last-child { margin-bottom: 0; }
 
-.order-row.take-profit {
-  background: #eafaf1;
-  border: 1px solid #a9dfbf;
-}
-
-.order-row.stop-loss {
-  background: #fdf0ef;
-  border: 1px solid #e8b4b0;
-}
+.order-row.take-profit { background: #eafaf1; border: 1px solid #a9dfbf; }
+.order-row.stop-loss   { background: #fdf0ef; border: 1px solid #e8b4b0; }
 
 .order-type {
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   font-weight: 600;
   color: #444;
   flex: 0 0 auto;
-  min-width: 110px;
+  min-width: 100px;
 }
 
 .order-price {
-  font-size: 1rem;
+  font-size: 0.95rem;
   font-weight: 800;
   flex: 1;
 }
 
-.order-row.take-profit .order-price { color: #1e8449; }
-.order-row.stop-loss   .order-price { color: #c0392b; }
+.order-price.take { color: #1e8449; }
+.order-price.stop { color: #c0392b; }
 
 .order-note {
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   color: #888;
   flex: 0 0 auto;
 }
 
 /* 考察 */
 .holding-insight {
-  padding: 9px 14px;
-  font-size: 0.82rem;
+  padding: 6px 12px;
+  font-size: 0.8rem;
   color: #333;
-  line-height: 1.6;
+  line-height: 1.5;
   border-left: 3px solid #1E3A5F;
-  margin: 0;
   background: #fff;
 }
