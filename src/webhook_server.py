@@ -277,19 +277,17 @@ class PortfolioRequest(BaseModel):
 
 def _verify_liff_token(access_token: str) -> str:
     """
-    LIFF アクセストークンを LINE API で検証し、ユーザー ID を返す。
+    LIFF アクセストークンを LINE Profile API で検証し、ユーザー ID を返す。
     検証失敗時は HTTPException(401) を送出する。
     """
     resp = _requests.get(
-        "https://api.line.me/oauth2/v2.1/verify",
-        params={"access_token": access_token},
+        "https://api.line.me/v2/profile",
+        headers={"Authorization": f"Bearer {access_token}"},
         timeout=5,
     )
     if resp.status_code != 200:
         raise HTTPException(status_code=401, detail="Invalid LIFF access token")
-    data = resp.json()
-    # client_id がチャンネル ID と一致するか確認（オプショナルだが推奨）
-    user_id = data.get("sub")
+    user_id = resp.json().get("userId")
     if not user_id:
         raise HTTPException(status_code=401, detail="User ID not found in token")
     return user_id
