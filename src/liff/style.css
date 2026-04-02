@@ -127,13 +127,12 @@ button[type="submit"]:disabled {
   background: #f8fafc;
   border: 1.5px solid #d0d7de;
   border-radius: 12px;
-  padding: 16px;
+  padding: 14px;
   font-size: 0.92rem;
-  line-height: 1.7;
+  line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
-  margin-bottom: 16px;
-  min-height: 80px;
+  margin-bottom: 12px;
 }
 
 .result-msg.success {
@@ -141,9 +140,13 @@ button[type="submit"]:disabled {
   background: #eafaf1;
 }
 
+/* 一覧モードはコンパクト表示 */
 .result-msg.list {
-  border-color: #aed6f1;
-  background: #eaf4fb;
+  padding: 4px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  line-height: 1.4;
 }
 
 .result-buttons {
@@ -186,35 +189,35 @@ button[type="submit"]:disabled {
 }
 
 /* ── 一覧ヘッダー ── */
-.list-header { margin-bottom: 10px; }
+.list-header { margin-bottom: 6px; }
 
 .list-title {
-  font-size: 1rem;
+  font-size: 0.95rem;
   font-weight: 700;
   color: #1E3A5F;
 }
 
 .list-updated {
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   color: #999;
-  margin-top: 3px;
+  margin-top: 2px;
 }
 
 /* ── 合計損益 ── */
 .list-total {
-  padding: 12px 14px;
-  border-radius: 12px;
-  margin-bottom: 14px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  margin-bottom: 8px;
   text-align: center;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   font-weight: 600;
 }
 
 .list-total.profit { background: #eafaf1; color: #1e8449; border: 1.5px solid #a9dfbf; }
 .list-total.loss   { background: #fdf0ef; color: #c0392b; border: 1.5px solid #e8b4b0; }
 
-.total-amount { font-size: 1.4rem; font-weight: 800; display: block; }
-.total-pct    { font-size: 0.85rem; }
+.total-amount { font-size: 1.2rem; font-weight: 800; display: inline; }
+.total-pct    { font-size: 0.82rem; }
 
 /* ── 銘柄カード ── */
 .holding-card {

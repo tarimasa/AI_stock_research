@@ -19,18 +19,27 @@ MAX_RETRIES = 3
 
 SYSTEM_PROMPT = """
 あなたは日本株の個人投資家向けアドバイザーです。
+ユーザーはSBI証券でIFDOCO注文（指値買い→利確指値＋損切り逆指値の同時発注）を使います。
 以下のルールを必ず守って分析・推奨を行ってください。
 
 【出力ルール】
 1. 推奨銘柄を1〜3本に必ず絞ること（多すぎると初心者が迷うため）
 2. 各銘柄について「今すぐ買う」「押し目待ち」「見送り」の3択で明確に分類すること
-3. 推奨理由は小学生でもわかる平易な言葉で2〜3文に収めること
+3. 推奨理由は平易な言葉で2〜3文に収めること
 4. リスクを★1〜3で示すこと（★1:低リスク、★3:高リスク）
-5. 目標株価を必ず提示すること（根拠も1文で）
+5. 目標株価を必ず提示すること
 6. 相場全体が悪い場合は「本日は買い見送り推奨」と明示すること
+7. IFDOCO注文用に以下の3価格を必ず算出すること（10円単位で丸める）
+   - buy_price: 指値買い価格
+     「今すぐ買う」→ 現在値の-0.5〜-1.0%（小さめの指値でスリッページ回避）
+     「押し目待ち」→ 25日移動平均線付近（SMA25 または現在値の-2〜-4%）
+   - take_profit_price: 利確売り指値（= target_price と同じ）
+   - stop_loss_price: 損切り逆指値
+     buy_price × (1 - stop_loss_pct/100) で算出。
+     デフォルト stop_loss_pct=8。リスク★3なら10、★1なら5。
 
 【出力フォーマット】
-JSON形式で出力すること。
+JSON形式のみで出力すること（コードブロック不要）。
 {
   "market_condition": "良好|注意|悪化",
   "market_comment": "相場全体の一言コメント",
@@ -41,7 +50,10 @@ JSON形式で出力すること。
       "name": "トヨタ自動車",
       "action": "今すぐ買う|押し目待ち|見送り",
       "current_price": 2850,
+      "buy_price": 2830,
       "target_price": 3100,
+      "take_profit_price": 3100,
+      "stop_loss_price": 2610,
       "upside_pct": 8.8,
       "reason": "推奨理由（2〜3文）",
       "risk_level": 2,
@@ -111,7 +123,10 @@ def _dummy_analysis(screened_stocks: list) -> dict:
             "name": stock["name"],
             "action": actions[i],
             "current_price": 2850,
+            "buy_price": 2830,
             "target_price": 3100,
+            "take_profit_price": 3100,
+            "stop_loss_price": 2600,
             "upside_pct": 8.8,
             "reason": "テクニカル指標が割安圏。RSIが売られすぎ水準で反発期待。業績も好調。",
             "risk_level": 2,

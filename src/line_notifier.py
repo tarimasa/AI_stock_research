@@ -38,11 +38,20 @@ def build_report_text(analysis: dict, portfolio_result: dict) -> str:
         for r in analysis.get("recommendations", []):
             emoji = ACTION_EMOJI.get(r.get("action", ""), "⚪")
             risk_star = RISK_STARS.get(r.get("risk_level", 2), "★★☆")
+            buy_p   = r.get("buy_price", r.get("current_price", 0))
+            tp_p    = r.get("take_profit_price", r.get("target_price", 0))
+            sl_p    = r.get("stop_loss_price", 0)
+            upside  = r.get("upside_pct", 0)
             lines.append(
-                f"{emoji} {r.get('action', '')} {r.get('code', '').replace('.T', '')} {r.get('name', '')}\n"
-                f"   ¥{r.get('current_price', 0):,} → 目標¥{r.get('target_price', 0):,}（+{r.get('upside_pct', 0)}%）\n"
+                f"{emoji} {r.get('action', '')}  "
+                f"{r.get('code', '').replace('.T', '')} {r.get('name', '')}\n"
+                f"   現在値 ¥{r.get('current_price', 0):,} → 目標 ¥{tp_p:,}（+{upside}%）\n"
                 f"   {r.get('reason', '')}\n"
-                f"   リスク: {risk_star} {r.get('risk_comment', '')}"
+                f"   リスク: {risk_star} {r.get('risk_comment', '')}\n"
+                f"   ┌─ IFDOCO注文（SBI証券）\n"
+                f"   │①買い指値   ¥{buy_p:,}\n"
+                f"   │②利確売り   ¥{tp_p:,}（指値）\n"
+                f"   └③損切り売り ¥{sl_p:,}（逆指値）"
             )
 
     if analysis.get("caution"):
