@@ -9,7 +9,7 @@ on:
       - 'requirements.txt'
       - 'Dockerfile'
       - 'config/watchlist.json'
-  workflow_dispatch:  # 手動実行も可能
+  workflow_dispatch:
 
 jobs:
   build-and-deploy:
@@ -23,27 +23,39 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: ACR にログイン
+      # az acr build = Azure 上でビルド。ローカル Docker 不要・ACR ログイン不要
+      - name: ACR でイメージをビルド
         run: |
-          az acr login --name ${{ secrets.ACR_NAME }}
-
-      - name: Docker イメージをビルド & プッシュ
-        run: |
-          IMAGE="${{ secrets.ACR_NAME }}.azurecr.io/ai-stock-bot:${{ github.sha }}"
-          docker build -t "$IMAGE" .
-          docker push "$IMAGE"
+          az acr build \
+            --registry ${{ secrets.ACR_NAME }} \
+            --image ai-stock-bot:${{ github.sha }} \
+            --image ai-stock-bot:latest \
+            .
 
       - name: Container App をデプロイ
         run: |
           IMAGE="${{ secrets.ACR_NAME }}.azurecr.io/ai-stock-bot:${{ github.sha }}"
+
+          # ACR の管理者ユーザー名・パスワードを取得してレジストリ認証を設定
+          ACR_USERNAME=$(az acr credential show \
+            --name ${{ secrets.ACR_NAME }} \
+            --query username -o tsv)
+          ACR_PASSWORD=$(az acr credential show \
+            --name ${{ secrets.ACR_NAME }} \
+            --query "passwords[0].value" -o tsv)
+
           az containerapp update \
             --name ${{ secrets.CONTAINER_APP_NAME }} \
             --resource-group ${{ secrets.RESOURCE_GROUP }} \
-            --image "$IMAGE"
+            --image "$IMAGE" \
+            --registry-server "${{ secrets.ACR_NAME }}.azurecr.io" \
+            --registry-username "$ACR_USERNAME" \
+            --registry-password "$ACR_PASSWORD"
 
       - name: デプロイ完了確認
         run: |
           az containerapp show \
             --name ${{ secrets.CONTAINER_APP_NAME }} \
             --resource-group ${{ secrets.RESOURCE_GROUP }} \
-            --query "properties.latestRevisionName" -o tsv
+            --query "{revision:properties.latestRevisionName, status:properties.latestRevisionFqdn}" \
+            -o table
