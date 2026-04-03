@@ -8,6 +8,7 @@ import asyncio
 import os
 import re
 import sys
+import threading
 from pathlib import Path
 from typing import Literal
 
@@ -24,7 +25,7 @@ from linebot.v3.messaging import (
     ReplyMessageRequest,
     TextMessage,
 )
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
+from linebot.v3.webhooks import MessageEvent, PostbackEvent, TextMessageContent
 from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -34,6 +35,10 @@ load_dotenv()
 import data_fetcher
 import line_notifier
 import portfolio_store
+import report as report_module
+
+# レポート再生成の多重実行を防ぐロック
+_report_lock = threading.Lock()
 
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
@@ -263,6 +268,56 @@ def handle_text_message(event: MessageEvent):
                 messages=[TextMessage(text=reply_text)],
             )
         )
+
+
+@handler.add(PostbackEvent)
+def handle_postback(event: PostbackEvent):
+    """Flex Message の「🔄 情報を更新」ボタンを処理する。"""
+    if event.postback.data != "action=refresh_report":
+        return
+
+    reply_token = event.reply_token
+
+    # 多重実行ガード: 既に実行中なら即時通知して終了
+    if not _report_lock.acquire(blocking=False):
+        with ApiClient(line_config) as api_client:
+            MessagingApi(api_client).reply_message(
+                ReplyMessageRequest(
+                    reply_token=reply_token,
+                    messages=[TextMessage(
+                        text="⏳ 現在更新中です。完了後にレポートをお送りします。"
+                    )],
+                )
+            )
+        return
+
+    # 即時返信（LINE の reply_token は 30 秒で失効するため先に返す）
+    with ApiClient(line_config) as api_client:
+        MessagingApi(api_client).reply_message(
+            ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(
+                    text="🔄 AI株式リサーチを更新しています...\n完了後にレポートをお送りします（3〜5分程度）。"
+                )],
+            )
+        )
+
+    def _run():
+        try:
+            report_module.run_report()
+        except Exception as e:
+            print(f"[webhook] オンデマンドレポート失敗: {e}")
+            try:
+                line_notifier.push_message([{
+                    "type": "text",
+                    "text": f"⚠️ レポート更新に失敗しました\n{e}",
+                }])
+            except Exception:
+                pass
+        finally:
+            _report_lock.release()
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 # ─────────────────────────────────────────
