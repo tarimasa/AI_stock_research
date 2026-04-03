@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import threading
+import uuid
 from pathlib import Path
 from typing import Literal
 
@@ -172,9 +173,18 @@ def execute_command(cmd: dict) -> str:
         except Exception:
             name = code
 
-        # 既存銘柄は上書き（同一コードで更新）
-        holdings = [h for h in holdings if h["code"] != code]
+        # 同一銘柄・同一取得価格の重複チェック（意図しない二重登録を防ぐ）
+        already_exists = any(
+            h["code"] == code and h["buy_price"] == price for h in holdings
+        )
+        if already_exists:
+            return (
+                f"⚠️ {name}（¥{price:,}）は既に登録されています。\n"
+                f"異なる取得単価で追加する場合はそのままご登録ください。"
+            )
+
         holdings.append({
+            "id": uuid.uuid4().hex[:8],
             "code": code,
             "name": name,
             "shares": shares,
@@ -194,19 +204,34 @@ def execute_command(cmd: dict) -> str:
         )
 
     if action == "remove":
-        code = cmd["code"]
-        target = next((h for h in holdings if h["code"] == code), None)
+        holding_id = cmd.get("holding_id")
+        code = cmd.get("code", "")
+
+        # holding_id 優先、なければコード（後方互換）
+        if holding_id:
+            target = next((h for h in holdings if h.get("id") == holding_id), None)
+            # IDなし旧データ向けフォールバック: "code:price" 形式
+            if not target:
+                for h in holdings:
+                    if f"{h['code']}:{h['buy_price']}" == holding_id:
+                        target = h
+                        break
+        elif code:
+            target = next((h for h in holdings if h["code"] == code), None)
+        else:
+            return "⚠️ 削除対象が指定されていません。"
+
         if not target:
-            return f"⚠️ {code.replace('.T', '')} は保有リストに見つかりません。"
+            return "⚠️ 指定された銘柄が見つかりません。"
+
         try:
-            stock_data = data_fetcher.fetch_stock_data(code)
+            stock_data = data_fetcher.fetch_stock_data(target["code"])
             current = stock_data.get("price", target["buy_price"])
         except Exception:
             current = target["buy_price"]
         pnl = (current - target["buy_price"]) * target["shares"]
         pnl_pct = (current - target["buy_price"]) / target["buy_price"] * 100
 
-        # 保有日数
         try:
             from datetime import date
             buy_date = date.fromisoformat(target.get("buy_date", date.today().isoformat()))
@@ -214,11 +239,18 @@ def execute_command(cmd: dict) -> str:
         except Exception:
             days = 0
 
-        holdings = [h for h in holdings if h["code"] != code]
-        portfolio["holdings"] = holdings
+        # target と同一オブジェクトのみ除外（同銘柄複数対応）
+        new_holdings = []
+        removed = False
+        for h in holdings:
+            if not removed and h is target:
+                removed = True
+            else:
+                new_holdings.append(h)
+        portfolio["holdings"] = new_holdings
         portfolio_store.save_portfolio(portfolio)
         return (
-            f"🗑️ {target['name']} を削除しました\n"
+            f"🗑️ {target['name']}（¥{target['buy_price']:,}）を削除しました\n"
             f"売却損益: {pnl:+,.0f}円（{pnl_pct:+.1f}%）\n"
             f"保有期間: {days}日間"
         )
@@ -325,10 +357,11 @@ def handle_postback(event: PostbackEvent):
 # ─────────────────────────────────────────
 
 class PortfolioRequest(BaseModel):
-    action: Literal["add", "remove", "list"]   # 列挙型で不正アクションを拒否
+    action: Literal["add", "remove", "list", "holdings"]  # 列挙型で不正アクションを拒否
     code: str | None = Field(default=None, pattern=r"^\d{4}$")  # 4桁数字のみ
     shares: int | None = Field(default=None, ge=1, le=100_000)  # 上限10万株
     price: int | None = Field(default=None, ge=1, le=100_000_000)  # 上限1億円
+    holding_id: str | None = Field(default=None, max_length=64)  # 個別削除用ID
 
 
 def _verify_liff_token(access_token: str) -> str:
@@ -536,6 +569,20 @@ async def portfolio_endpoint(
             import traceback
             print(f"[ERROR] _build_list_data failed: {e}\n{traceback.format_exc()}")
             raise HTTPException(status_code=500, detail=f"Internal server error: {e}")
+
+    elif payload.action == "holdings":
+        # 削除選択UI用: ストレージから保有株一覧を軽量取得（リアルタイム価格なし）
+        portfolio = portfolio_store.load_portfolio()
+        holdings = portfolio.get("holdings", [])
+        # IDなし旧データには "code:price" 形式の合成IDを付与
+        result = []
+        for h in holdings:
+            entry = dict(h)
+            if "id" not in entry:
+                entry["id"] = f"{h['code']}:{h['buy_price']}"
+            result.append(entry)
+        return {"status": "ok", "holdings": result}
+
     else:
         cmd: dict = {"action": payload.action}
         if payload.code:
@@ -545,6 +592,8 @@ async def portfolio_endpoint(
             cmd["shares"] = payload.shares
         if payload.price:
             cmd["price"] = payload.price
+        if payload.holding_id:
+            cmd["holding_id"] = payload.holding_id
 
         try:
             reply_text = execute_command(cmd)
