@@ -10,6 +10,7 @@ import re
 import sys
 import threading
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -40,6 +41,17 @@ import report as report_module
 
 # レポート再生成の多重実行を防ぐロック
 _report_lock = threading.Lock()
+
+# 一覧ビュー用インメモリキャッシュ（リアルタイム価格）
+_list_cache: dict | None = None  # {"data": holdings_data, "fetched_at": datetime}
+_list_cache_lock = threading.Lock()
+_CACHE_TTL_SECONDS = 180  # 3分
+
+
+def _invalidate_list_cache() -> None:
+    global _list_cache
+    with _list_cache_lock:
+        _list_cache = None
 
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
@@ -126,6 +138,29 @@ def parse_command(text: str) -> dict | None:
 def execute_command(cmd: dict) -> str:
     action = cmd["action"]
 
+    if action == "refresh":
+        _invalidate_list_cache()
+        if not _report_lock.acquire(blocking=False):
+            return "⏳ 現在更新中です。完了後にレポートをお送りします。"
+
+        def _run():
+            try:
+                report_module.run_report()
+            except Exception as e:
+                print(f"[webhook] オンデマンドレポート失敗: {e}")
+                try:
+                    line_notifier.push_message([{
+                        "type": "text",
+                        "text": f"⚠️ レポート更新に失敗しました\n{e}",
+                    }])
+                except Exception:
+                    pass
+            finally:
+                _report_lock.release()
+
+        threading.Thread(target=_run, daemon=True).start()
+        return "🔄 AI株式リサーチを更新しています...\n完了後にレポートをお送りします（3〜5分程度）。"
+
     if action == "help":
         return (
             "📋 コマンド一覧\n\n"
@@ -196,6 +231,7 @@ def execute_command(cmd: dict) -> str:
         })
         portfolio["holdings"] = holdings
         portfolio_store.save_portfolio(portfolio)
+        _invalidate_list_cache()
         total = shares * price
         return (
             f"✅ {name} を追加しました\n"
@@ -249,6 +285,7 @@ def execute_command(cmd: dict) -> str:
                 new_holdings.append(h)
         portfolio["holdings"] = new_holdings
         portfolio_store.save_portfolio(portfolio)
+        _invalidate_list_cache()
         return (
             f"🗑️ {target['name']}（¥{target['buy_price']:,}）を削除しました\n"
             f"売却損益: {pnl:+,.0f}円（{pnl_pct:+.1f}%）\n"
@@ -546,29 +583,42 @@ async def portfolio_endpoint(
     response: dict = {"status": "ok"}
 
     if payload.action == "list":
-        # 一覧は _build_list_data で並列取得し、その結果から LINE テキストも生成
-        # （execute_command("list") と _build_list_data の二重取得を排除）
-        try:
-            portfolio = portfolio_store.load_portfolio()
-            holdings_data = await _build_list_data(portfolio)
-            response["holdings_data"] = holdings_data
+        # キャッシュが有効（3分以内）なら即返却、期限切れなら並列取得して更新
+        holdings_data = None
+        with _list_cache_lock:
+            cached = _list_cache
+            if cached is not None:
+                age = (datetime.now() - cached["fetched_at"]).total_seconds()
+                if age < _CACHE_TTL_SECONDS:
+                    holdings_data = cached["data"]
 
-            if holdings_data["count"] == 0:
-                reply_text = "📦 保有株はありません。\n「追加 7203 100 2650」の形式で追加できます。"
-            else:
-                lines = [f"📦 保有株一覧（{holdings_data['count']}銘柄）\n"]
-                for item in holdings_data["holdings"]:
-                    emoji = "🟢" if item["pnl"] > 0 else ("🔴" if item["pnl"] < 0 else "⚪")
-                    lines.append(
-                        f"{item['code']} {item['name']}  "
-                        f"{item['shares']}株 ¥{item['current_price']:,} {item['pnl_pct']:+.1f}% {emoji}"
-                    )
-                lines.append(f"\n━━━━━━━━━━\n合計評価損益: {holdings_data['total_pnl']:+,.0f}円")
-                reply_text = "\n".join(lines)
-        except Exception as e:
-            import traceback
-            print(f"[ERROR] _build_list_data failed: {e}\n{traceback.format_exc()}")
-            raise HTTPException(status_code=500, detail=f"Internal server error: {e}")
+        if holdings_data is None:
+            try:
+                portfolio = portfolio_store.load_portfolio()
+                holdings_data = await _build_list_data(portfolio)
+            except Exception as e:
+                import traceback
+                print(f"[ERROR] _build_list_data failed: {e}\n{traceback.format_exc()}")
+                raise HTTPException(status_code=500, detail=f"Internal server error: {e}")
+
+            with _list_cache_lock:
+                global _list_cache
+                _list_cache = {"data": holdings_data, "fetched_at": datetime.now()}
+
+        response["holdings_data"] = holdings_data
+
+        if holdings_data["count"] == 0:
+            reply_text = "📦 保有株はありません。\n「追加 7203 100 2650」の形式で追加できます。"
+        else:
+            lines = [f"📦 保有株一覧（{holdings_data['count']}銘柄）\n"]
+            for item in holdings_data["holdings"]:
+                emoji = "🟢" if item["pnl"] > 0 else ("🔴" if item["pnl"] < 0 else "⚪")
+                lines.append(
+                    f"{item['code']} {item['name']}  "
+                    f"{item['shares']}株 ¥{item['current_price']:,} {item['pnl_pct']:+.1f}% {emoji}"
+                )
+            lines.append(f"\n━━━━━━━━━━\n合計評価損益: {holdings_data['total_pnl']:+,.0f}円")
+            reply_text = "\n".join(lines)
 
     elif payload.action == "holdings":
         # 削除選択UI用: ストレージから保有株一覧を軽量取得（リアルタイム価格なし）
