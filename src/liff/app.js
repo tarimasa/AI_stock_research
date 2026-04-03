@@ -3,6 +3,7 @@
 const WEBHOOK_BASE_URL = "https://YOUR-CONTAINER-APP.japaneast.azurecontainerapps.io";
 
 let liffUserId = null;
+let autoCloseTimer = null;  // 自動クローズタイマーID
 
 async function initLiff() {
   try {
@@ -44,22 +45,38 @@ function hideError() {
   document.getElementById("errorMsg").style.display = "none";
 }
 
-function showResult(message, type) {
+function cancelAutoClose() {
+  if (autoCloseTimer !== null) {
+    clearTimeout(autoCloseTimer);
+    autoCloseTimer = null;
+  }
+}
+
+function showResult(message, type, action) {
   document.getElementById("portfolioForm").style.display = "none";
   const resultArea = document.getElementById("resultArea");
   const resultMsg = document.getElementById("resultMsg");
+  const continueBtn = document.getElementById("continueBtn");
+  const backBtn = document.getElementById("backBtn");
+
   resultMsg.textContent = message;
   resultMsg.className = `result-msg ${type}`;
   resultArea.style.display = "block";
 
-  // 追加・削除は3秒後に自動クローズ、一覧は手動クローズのみ
-  if (type === "success") {
-    setTimeout(() => liff.closeWindow(), 3000);
+  // 「続けて追加する」は追加成功時のみ表示、「戻る」は削除/エラー時
+  const isAddSuccess = (type === "success" && action === "add");
+  continueBtn.style.display = isAddSuccess ? "block" : "none";
+  backBtn.style.display = isAddSuccess ? "none" : "block";
+
+  // 追加成功時のみ5秒後に自動クローズ（続けて追加・戻るボタンで解除される）
+  cancelAutoClose();
+  if (isAddSuccess) {
+    autoCloseTimer = setTimeout(() => liff.closeWindow(), 5000);
   }
 }
 
 function validateForm(action, code, shares, price) {
-  if (action === "list") return true;
+  if (action === "list" || action === "remove") return true;
 
   if (!code || !/^\d{4}$/.test(code)) {
     showError("銘柄コードは4桁の数字で入力してください。");
@@ -101,22 +118,77 @@ async function submitPortfolio(payload) {
   return resp.json();
 }
 
+/** 削除モード用: 保有株一覧をラジオリストとして表示 */
+async function loadHoldingsForDelete() {
+  const container = document.getElementById("deleteList");
+  container.innerHTML = '<div class="delete-loading">📡 読み込み中...</div>';
+  container.style.display = "block";
+  document.getElementById("submitBtn").disabled = true;
+
+  try {
+    const data = await submitPortfolio({ action: "holdings" });
+    const holdings = data.holdings || [];
+
+    if (holdings.length === 0) {
+      container.innerHTML = '<div class="delete-empty">📦 保有株がありません</div>';
+      return;
+    }
+
+    let html = '<div class="delete-label-title">削除する銘柄を選択</div>';
+    for (const h of holdings) {
+      const id = esc(h.id || `${h.code}:${h.buy_price}`);
+      const code = esc((h.code || "").replace(".T", ""));
+      const name = esc(h.name || "");
+      const price = Number(h.buy_price || 0).toLocaleString();
+      const shares = Number(h.shares || 0).toLocaleString();
+      html += `
+        <label class="delete-radio-item">
+          <input type="radio" name="holdingId" value="${id}" />
+          <span class="delete-radio-label">
+            <span class="delete-code">${code}</span>
+            <span class="delete-name">${name}</span>
+            <span class="delete-price">¥${price}（${shares}株）</span>
+          </span>
+        </label>`;
+    }
+    container.innerHTML = html;
+
+    // ラジオ選択時にボタンを有効化
+    container.querySelectorAll('input[type="radio"]').forEach(radio => {
+      radio.addEventListener("change", () => {
+        document.getElementById("submitBtn").disabled = false;
+      });
+    });
+  } catch (err) {
+    container.innerHTML = `<div class="delete-error">⚠️ 読み込み失敗: ${esc(err.message)}</div>`;
+  }
+}
+
 function updateFormLayout(action) {
   const addFields = document.getElementById("addFields");
   const codeGroup = document.getElementById("codeGroup");
+  const deleteList = document.getElementById("deleteList");
   const submitBtn = document.getElementById("submitBtn");
+
+  deleteList.style.display = "none";
+  deleteList.innerHTML = "";
+
   if (action === "list") {
     addFields.style.display = "none";
     codeGroup.style.display = "none";
     submitBtn.textContent = "📋 一覧を表示";
+    submitBtn.disabled = false;
   } else if (action === "remove") {
     addFields.style.display = "none";
-    codeGroup.style.display = "block";
+    codeGroup.style.display = "none";
     submitBtn.textContent = "🗑️ 削除する";
+    submitBtn.disabled = true;  // ラジオ選択後に有効化
+    loadHoldingsForDelete();
   } else {
     addFields.style.display = "block";
     codeGroup.style.display = "block";
     submitBtn.textContent = "✅ 登録する";
+    submitBtn.disabled = false;
   }
 }
 
@@ -125,6 +197,7 @@ updateFormLayout("list");
 
 // 操作選択時のフォーム表示切り替え
 document.getElementById("action").addEventListener("change", function () {
+  hideError();
   updateFormLayout(this.value);
 });
 
@@ -141,10 +214,20 @@ document.getElementById("portfolioForm").addEventListener("submit", async functi
   if (!validateForm(action, code, shares, price)) return;
 
   const payload = { action };
-  if (action !== "list") payload.code = code;
-  if (action === "add") {
-    payload.shares = parseInt(shares);
-    payload.price = parseInt(price);
+
+  if (action === "remove") {
+    const selected = document.querySelector('input[name="holdingId"]:checked');
+    if (!selected) {
+      showError("削除する銘柄を選択してください。");
+      return;
+    }
+    payload.holding_id = selected.value;
+  } else if (action !== "list") {
+    payload.code = code;
+    if (action === "add") {
+      payload.shares = parseInt(shares);
+      payload.price = parseInt(price);
+    }
   }
 
   const submitBtn = document.getElementById("submitBtn");
@@ -156,7 +239,7 @@ document.getElementById("portfolioForm").addEventListener("submit", async functi
     if (action === "list" && data.holdings_data) {
       showHoldingsList(data.holdings_data);
     } else {
-      showResult(data.message || "完了しました。", "success");
+      showResult(data.message || "完了しました。", "success", action);
     }
   } catch (err) {
     showError(err.message || "送信に失敗しました。もう一度お試しください。");
@@ -230,15 +313,34 @@ function showHoldingsList(data) {
   document.getElementById("resultMsg").innerHTML = html;
   document.getElementById("resultMsg").className = "result-msg list";
   document.getElementById("resultArea").style.display = "block";
+
+  // 一覧表示時は「続けて追加」非表示・「戻る」表示
+  document.getElementById("continueBtn").style.display = "none";
+  document.getElementById("backBtn").style.display = "block";
 }
 
 // 戻るボタン
 document.getElementById("backBtn").addEventListener("click", function () {
+  cancelAutoClose();
   document.getElementById("resultArea").style.display = "none";
   document.getElementById("portfolioForm").style.display = "block";
-  const submitBtn = document.getElementById("submitBtn");
-  submitBtn.disabled = false;
-  submitBtn.textContent = "✅ 登録する";
+  const action = document.getElementById("action").value;
+  updateFormLayout(action);
+});
+
+// 続けて追加するボタン
+document.getElementById("continueBtn").addEventListener("click", function () {
+  cancelAutoClose();
+  document.getElementById("resultArea").style.display = "none";
+  document.getElementById("portfolioForm").style.display = "block";
+  // 追加フォームにリセット
+  document.getElementById("action").value = "add";
+  document.getElementById("code").value = "";
+  document.getElementById("shares").value = "";
+  document.getElementById("price").value = "";
+  hideError();
+  updateFormLayout("add");
+  document.getElementById("code").focus();
 });
 
 // LINEに戻るボタン
