@@ -68,39 +68,25 @@ def fetch_current_price(ticker: str) -> float:
     return float(df["Close"].iloc[-1]) if not df.empty else 0.0
 
 
-def fetch_stock_data(ticker: str) -> dict:
+def fetch_stock_data_with_df(ticker: str) -> tuple[dict, pd.DataFrame]:
     """
-    Returns:
-    {
-        "code": "7203.T",
-        "price": 2850,
-        "change_pct": 1.2,
-        "per": 8.2,
-        "pbr": 1.1,
-        "dividend_yield": 2.8,
-        "rsi_14": 38.5,
-        "ma25_diff_pct": -2.1,
-        "ma75_diff_pct": 3.4,
-        "volume_ratio": 1.35,
-        "week52_high": 3200,
-        "week52_low": 2100,
-    }
+    fetch_stock_data と同じ結果を返すが、計算に使った OHLCV DataFrame も返す。
+    呼び出し元が同じ df を MACD 等の追加計算に再利用でき、二重取得を避けられる。
     """
     if DRY_RUN:
-        return _dummy_stock_data(ticker)
+        return _dummy_stock_data(ticker), pd.DataFrame()
 
     df = fetch_ohlcv(ticker, days=90)
     info = fetch_info(ticker)
 
     if df.empty:
-        return {"code": ticker, "error": "no data"}
+        return {"code": ticker, "error": "no data"}, df
 
     close = df["Close"]
-    # リアルタイム価格を優先、取れなければ日足終値
     current_price = fetch_current_price(ticker)
     if current_price <= 0:
         current_price = float(close.iloc[-1])
-    prev_price = float(close.iloc[-1])  # 日足直近終値を前日比の基準に使う
+    prev_price = float(close.iloc[-1])
     change_pct = (current_price - prev_price) / prev_price * 100
 
     rsi_14 = _calc_rsi(close, 14)
@@ -127,7 +113,29 @@ def fetch_stock_data(ticker: str) -> dict:
         "volume_ratio": round(volume_ratio, 2),
         "week52_high": info.get("fiftyTwoWeekHigh"),
         "week52_low": info.get("fiftyTwoWeekLow"),
+    }, df
+
+
+def fetch_stock_data(ticker: str) -> dict:
+    """
+    Returns:
+    {
+        "code": "7203.T",
+        "price": 2850,
+        "change_pct": 1.2,
+        "per": 8.2,
+        "pbr": 1.1,
+        "dividend_yield": 2.8,
+        "rsi_14": 38.5,
+        "ma25_diff_pct": -2.1,
+        "ma75_diff_pct": 3.4,
+        "volume_ratio": 1.35,
+        "week52_high": 3200,
+        "week52_low": 2100,
     }
+    """
+    data, _ = fetch_stock_data_with_df(ticker)
+    return data
 
 
 def fetch_market_data() -> dict:
