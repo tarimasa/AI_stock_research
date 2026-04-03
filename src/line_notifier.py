@@ -113,16 +113,29 @@ def build_flex_message(report_text: str) -> dict:
             "footer": {
                 "type": "box",
                 "layout": "vertical",
-                "contents": [{
-                    "type": "button",
-                    "action": {
-                        "type": "uri",
-                        "label": "📝 銘柄を更新する",
-                        "uri": LIFF_URL,
+                "spacing": "sm",
+                "contents": [
+                    {
+                        "type": "button",
+                        "action": {
+                            "type": "postback",
+                            "label": "🔄 情報を更新",
+                            "data": "action=refresh_report",
+                            "displayText": "情報を更新",
+                        },
+                        "style": "primary",
+                        "color": "#1E3A5F",
                     },
-                    "style": "primary",
-                    "color": "#1E3A5F",
-                }],
+                    {
+                        "type": "button",
+                        "action": {
+                            "type": "uri",
+                            "label": "📝 銘柄を更新する",
+                            "uri": LIFF_URL,
+                        },
+                        "style": "secondary",
+                    },
+                ],
             },
         },
     }
