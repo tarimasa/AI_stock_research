@@ -118,10 +118,9 @@ def build_flex_message(report_text: str) -> dict:
                     {
                         "type": "button",
                         "action": {
-                            "type": "postback",
+                            "type": "message",
                             "label": "🔄 情報を更新",
-                            "data": "action=refresh_report",
-                            "displayText": "情報を更新",
+                            "text": "更新",
                         },
                         "style": "primary",
                         "color": "#1E3A5F",

@@ -118,6 +118,44 @@ async function submitPortfolio(payload) {
   return resp.json();
 }
 
+/** 削除ラジオリストをレンダリング（holdings/list 両フォーマット対応） */
+function renderDeleteRadioList(holdings, fromListAction) {
+  const container = document.getElementById("deleteList");
+  if (holdings.length === 0) {
+    container.innerHTML = '<div class="delete-empty">📦 保有株がありません</div>';
+    return;
+  }
+
+  let html = '<div class="delete-label-title">削除する銘柄を選択</div>';
+  for (const h of holdings) {
+    // list アクション応答は .T なし、holdings アクション応答は .T あり
+    const code4 = fromListAction ? h.code : (h.code || "").replace(".T", "");
+    const codeWithT = fromListAction ? (h.code + ".T") : (h.code || "");
+    // holding_id: 新サーバーは uuid、旧サーバーフォールバックは "7203.T:2650" 形式
+    const holdingId = (!fromListAction && h.id) ? h.id : `${codeWithT}:${h.buy_price}`;
+    const price = Number(h.buy_price || 0).toLocaleString();
+    const shares = Number(h.shares || 0).toLocaleString();
+
+    html += `
+      <label class="delete-radio-item">
+        <input type="radio" name="holdingId"
+               value="${esc(holdingId)}"
+               data-code="${esc(code4)}" />
+        <span class="delete-radio-label">
+          <span class="delete-code">${esc(code4)}</span>
+          <span class="delete-name">${esc(h.name || "")}</span>
+          <span class="delete-price">¥${price}（${shares}株）</span>
+        </span>
+      </label>`;
+  }
+  container.innerHTML = html;
+  container.querySelectorAll('input[type="radio"]').forEach(radio => {
+    radio.addEventListener("change", () => {
+      document.getElementById("submitBtn").disabled = false;
+    });
+  });
+}
+
 /** 削除モード用: 保有株一覧をラジオリストとして表示 */
 async function loadHoldingsForDelete() {
   const container = document.getElementById("deleteList");
@@ -125,40 +163,17 @@ async function loadHoldingsForDelete() {
   container.style.display = "block";
   document.getElementById("submitBtn").disabled = true;
 
+  // 新API (holdings) を試み、失敗したら旧API (list) にフォールバック
   try {
     const data = await submitPortfolio({ action: "holdings" });
-    const holdings = data.holdings || [];
+    renderDeleteRadioList(data.holdings || [], false);
+    return;
+  } catch (_) { /* fall through */ }
 
-    if (holdings.length === 0) {
-      container.innerHTML = '<div class="delete-empty">📦 保有株がありません</div>';
-      return;
-    }
-
-    let html = '<div class="delete-label-title">削除する銘柄を選択</div>';
-    for (const h of holdings) {
-      const id = esc(h.id || `${h.code}:${h.buy_price}`);
-      const code = esc((h.code || "").replace(".T", ""));
-      const name = esc(h.name || "");
-      const price = Number(h.buy_price || 0).toLocaleString();
-      const shares = Number(h.shares || 0).toLocaleString();
-      html += `
-        <label class="delete-radio-item">
-          <input type="radio" name="holdingId" value="${id}" />
-          <span class="delete-radio-label">
-            <span class="delete-code">${code}</span>
-            <span class="delete-name">${name}</span>
-            <span class="delete-price">¥${price}（${shares}株）</span>
-          </span>
-        </label>`;
-    }
-    container.innerHTML = html;
-
-    // ラジオ選択時にボタンを有効化
-    container.querySelectorAll('input[type="radio"]').forEach(radio => {
-      radio.addEventListener("change", () => {
-        document.getElementById("submitBtn").disabled = false;
-      });
-    });
+  try {
+    const data = await submitPortfolio({ action: "list" });
+    const holdings = (data.holdings_data && data.holdings_data.holdings) || [];
+    renderDeleteRadioList(holdings, true);
   } catch (err) {
     container.innerHTML = `<div class="delete-error">⚠️ 読み込み失敗: ${esc(err.message)}</div>`;
   }
@@ -221,7 +236,10 @@ document.getElementById("portfolioForm").addEventListener("submit", async functi
       showError("削除する銘柄を選択してください。");
       return;
     }
+    // holding_id: 新サーバーが個別識別に使用
+    // code: 旧サーバー互換（code のみで削除する旧ロジック向け）
     payload.holding_id = selected.value;
+    payload.code = selected.dataset.code;
   } else if (action !== "list") {
     payload.code = code;
     if (action === "add") {

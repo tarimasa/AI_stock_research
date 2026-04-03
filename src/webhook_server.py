@@ -26,7 +26,7 @@ from linebot.v3.messaging import (
     ReplyMessageRequest,
     TextMessage,
 )
-from linebot.v3.webhooks import MessageEvent, PostbackEvent, TextMessageContent
+from linebot.v3.webhooks import MessageEvent, TextMessageContent
 from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -116,6 +116,9 @@ def parse_command(text: str) -> dict | None:
     elif cmd in ["ヘルプ", "help"]:
         return {"action": "help"}
 
+    elif cmd in ["更新", "refresh", "再取得"]:
+        return {"action": "refresh"}
+
     return None
 
 
@@ -126,6 +129,28 @@ def parse_command(text: str) -> dict | None:
 def execute_command(cmd: dict) -> str:
     action = cmd["action"]
 
+    if action == "refresh":
+        if not _report_lock.acquire(blocking=False):
+            return "⏳ 現在更新中です。完了後にレポートをお送りします。"
+
+        def _run():
+            try:
+                report_module.run_report()
+            except Exception as e:
+                print(f"[webhook] オンデマンドレポート失敗: {e}")
+                try:
+                    line_notifier.push_message([{
+                        "type": "text",
+                        "text": f"⚠️ レポート更新に失敗しました\n{e}",
+                    }])
+                except Exception:
+                    pass
+            finally:
+                _report_lock.release()
+
+        threading.Thread(target=_run, daemon=True).start()
+        return "🔄 AI株式リサーチを更新しています...\n完了後にレポートをお送りします（3〜5分程度）。"
+
     if action == "help":
         return (
             "📋 コマンド一覧\n\n"
@@ -134,6 +159,7 @@ def execute_command(cmd: dict) -> str:
             "削除 [コード]\n"
             "  例: 削除 7203\n\n"
             "一覧  → 保有株一覧を表示\n"
+            "更新  → AI株式リサーチを再実行\n"
             "ヘルプ → このメッセージ"
         )
 
@@ -300,56 +326,6 @@ def handle_text_message(event: MessageEvent):
                 messages=[TextMessage(text=reply_text)],
             )
         )
-
-
-@handler.add(PostbackEvent)
-def handle_postback(event: PostbackEvent):
-    """Flex Message の「🔄 情報を更新」ボタンを処理する。"""
-    if event.postback.data != "action=refresh_report":
-        return
-
-    reply_token = event.reply_token
-
-    # 多重実行ガード: 既に実行中なら即時通知して終了
-    if not _report_lock.acquire(blocking=False):
-        with ApiClient(line_config) as api_client:
-            MessagingApi(api_client).reply_message(
-                ReplyMessageRequest(
-                    reply_token=reply_token,
-                    messages=[TextMessage(
-                        text="⏳ 現在更新中です。完了後にレポートをお送りします。"
-                    )],
-                )
-            )
-        return
-
-    # 即時返信（LINE の reply_token は 30 秒で失効するため先に返す）
-    with ApiClient(line_config) as api_client:
-        MessagingApi(api_client).reply_message(
-            ReplyMessageRequest(
-                reply_token=reply_token,
-                messages=[TextMessage(
-                    text="🔄 AI株式リサーチを更新しています...\n完了後にレポートをお送りします（3〜5分程度）。"
-                )],
-            )
-        )
-
-    def _run():
-        try:
-            report_module.run_report()
-        except Exception as e:
-            print(f"[webhook] オンデマンドレポート失敗: {e}")
-            try:
-                line_notifier.push_message([{
-                    "type": "text",
-                    "text": f"⚠️ レポート更新に失敗しました\n{e}",
-                }])
-            except Exception:
-                pass
-        finally:
-            _report_lock.release()
-
-    threading.Thread(target=_run, daemon=True).start()
 
 
 # ─────────────────────────────────────────
