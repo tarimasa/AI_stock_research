@@ -199,16 +199,6 @@ def execute_command(cmd: dict) -> str:
         except Exception:
             name = code
 
-        # 同一銘柄・同一取得価格の重複チェック（意図しない二重登録を防ぐ）
-        already_exists = any(
-            h["code"] == code and h["buy_price"] == price for h in holdings
-        )
-        if already_exists:
-            return (
-                f"⚠️ {name}（¥{price:,}）は既に登録されています。\n"
-                f"異なる取得単価で追加する場合はそのままご登録ください。"
-            )
-
         holdings.append({
             "id": uuid.uuid4().hex[:8],
             "code": code,
