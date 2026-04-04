@@ -1,0 +1,67 @@
+name: Deploy Container App
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**/*.py'
+      - 'requirements.txt'
+      - 'Dockerfile'
+      - 'config/watchlist.json'
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure ログイン
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # az acr build = Azure 上でビルド。ローカル Docker 不要・ACR ログイン不要
+      - name: ACR でイメージをビルド
+        run: |
+          az acr build \
+            --registry ${{ secrets.ACR_NAME }} \
+            --image ai-stock-bot:${{ github.sha }} \
+            --image ai-stock-bot:latest \
+            .
+
+      - name: Container App をデプロイ
+        run: |
+          IMAGE="${{ secrets.ACR_NAME }}.azurecr.io/ai-stock-bot:${{ github.sha }}"
+
+          # ACR の管理者ユーザー名・パスワードを取得
+          ACR_USERNAME=$(az acr credential show \
+            --name ${{ secrets.ACR_NAME }} \
+            --query username -o tsv)
+          ACR_PASSWORD=$(az acr credential show \
+            --name ${{ secrets.ACR_NAME }} \
+            --query "passwords[0].value" -o tsv)
+
+          # レジストリ認証を設定（containerapp update は --registry-* を受け付けない）
+          az containerapp registry set \
+            --name ${{ secrets.CONTAINER_APP_NAME }} \
+            --resource-group ${{ secrets.RESOURCE_GROUP }} \
+            --server "${{ secrets.ACR_NAME }}.azurecr.io" \
+            --username "$ACR_USERNAME" \
+            --password "$ACR_PASSWORD"
+
+          # イメージを更新
+          az containerapp update \
+            --name ${{ secrets.CONTAINER_APP_NAME }} \
+            --resource-group ${{ secrets.RESOURCE_GROUP }} \
+            --image "$IMAGE"
+
+      - name: デプロイ完了確認
+        run: |
+          az containerapp show \
+            --name ${{ secrets.CONTAINER_APP_NAME }} \
+            --resource-group ${{ secrets.RESOURCE_GROUP }} \
+            --query "{revision:properties.latestRevisionName, status:properties.latestRevisionFqdn}" \
+            -o table
