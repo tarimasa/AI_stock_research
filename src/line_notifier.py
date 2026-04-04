@@ -38,14 +38,15 @@ def build_report_text(analysis: dict, portfolio_result: dict) -> str:
         for r in analysis.get("recommendations", []):
             emoji = ACTION_EMOJI.get(r.get("action", ""), "⚪")
             risk_star = RISK_STARS.get(r.get("risk_level", 2), "★★☆")
-            buy_p   = r.get("buy_price", r.get("current_price", 0))
-            tp_p    = r.get("take_profit_price", r.get("target_price", 0))
-            sl_p    = r.get("stop_loss_price", 0)
-            upside  = r.get("upside_pct", 0)
+            buy_p   = r.get("buy_price") or r.get("current_price") or 0
+            tp_p    = r.get("take_profit_price") or r.get("target_price") or 0
+            sl_p    = r.get("stop_loss_price") or 0
+            upside  = r.get("upside_pct") or 0
+            current_p = r.get("current_price") or 0
             lines.append(
                 f"{emoji} {r.get('action', '')}  "
                 f"{r.get('code', '').replace('.T', '')} {r.get('name', '')}\n"
-                f"   現在値 ¥{r.get('current_price', 0):,} → 目標 ¥{tp_p:,}（+{upside}%）\n"
+                f"   現在値 ¥{current_p:,} → 目標 ¥{tp_p:,}（+{upside}%）\n"
                 f"   {r.get('reason', '')}\n"
                 f"   リスク: {risk_star} {r.get('risk_comment', '')}\n"
                 f"   ┌─ IFDOCO注文（SBI証券）\n"
