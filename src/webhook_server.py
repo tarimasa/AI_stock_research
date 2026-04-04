@@ -43,6 +43,8 @@ _report_lock = threading.Lock()
 
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
+LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 # LIFF からのリクエストを許可するオリジン（デプロイ先URLに変更）
 LIFF_ORIGIN = os.environ.get("LIFF_ORIGIN", "https://liff.line.me")
 
@@ -52,10 +54,16 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 起動時に必須環境変数を検証（テスト時の import では実行されない）
-    if not LINE_CHANNEL_SECRET:
-        raise RuntimeError("LINE_CHANNEL_SECRET が設定されていません")
-    if not LINE_CHANNEL_ACCESS_TOKEN:
-        raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が設定されていません")
+    missing = [
+        name for name, val in [
+            ("LINE_CHANNEL_SECRET", LINE_CHANNEL_SECRET),
+            ("LINE_CHANNEL_ACCESS_TOKEN", LINE_CHANNEL_ACCESS_TOKEN),
+            ("LINE_USER_ID", LINE_USER_ID),
+            ("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY),
+        ] if not val
+    ]
+    if missing:
+        raise RuntimeError(f"必須環境変数が設定されていません: {', '.join(missing)}")
     yield
 
 
@@ -133,18 +141,19 @@ def execute_command(cmd: dict) -> str:
         if not _report_lock.acquire(blocking=False):
             return "⏳ 現在更新中です。完了後にレポートをお送りします。"
 
+        import traceback
+
         def _run():
             try:
                 report_module.run_report()
             except Exception as e:
-                print(f"[webhook] オンデマンドレポート失敗: {e}")
+                tb = traceback.format_exc()
+                print(f"[webhook] オンデマンドレポート失敗:\n{tb}", flush=True)
+                error_text = f"⚠️ レポート更新に失敗しました\n{e}"
                 try:
-                    line_notifier.push_message([{
-                        "type": "text",
-                        "text": f"⚠️ レポート更新に失敗しました\n{e}",
-                    }])
-                except Exception:
-                    pass
+                    line_notifier.push_message([{"type": "text", "text": error_text}])
+                except Exception as push_err:
+                    print(f"[webhook] エラー通知のLINE送信も失敗: {push_err}", flush=True)
             finally:
                 _report_lock.release()
 
