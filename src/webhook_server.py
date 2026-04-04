@@ -291,10 +291,12 @@ def execute_command(cmd: dict) -> str:
 async def webhook(request: Request):
     signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
+    print(f"[webhook] received len={len(body)} sig={signature[:16] if signature else 'none'}...", flush=True)
 
     try:
         handler.handle(body.decode("utf-8"), signature)
     except InvalidSignatureError:
+        print("[webhook] Invalid signature", flush=True)
         raise HTTPException(status_code=400, detail="Invalid signature")
 
     return {"status": "ok"}
@@ -585,6 +587,42 @@ async def portfolio_endpoint(
 
     response["message"] = reply_text
     return response
+
+
+# ─────────────────────────────────────────
+# LIFF からのレポート更新エンドポイント
+# ─────────────────────────────────────────
+
+@app.post("/refresh")
+async def refresh_endpoint(
+    authorization: str | None = Header(default=None),
+):
+    """LIFF から呼び出してレポートをオンデマンド更新する。"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authorization header required")
+    liff_token = authorization.removeprefix("Bearer ")
+    _verify_liff_token(liff_token)
+
+    if not _report_lock.acquire(blocking=False):
+        return {"status": "busy", "message": "⏳ 現在更新中です。完了後にLINEにレポートをお送りします。"}
+
+    import traceback
+
+    def _run():
+        try:
+            report_module.run_report()
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[refresh] レポート生成失敗:\n{tb}", flush=True)
+            try:
+                line_notifier.push_message([{"type": "text", "text": f"⚠️ レポート更新に失敗しました\n{e}"}])
+            except Exception as push_err:
+                print(f"[refresh] エラー通知のLINE送信も失敗: {push_err}", flush=True)
+        finally:
+            _report_lock.release()
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "ok", "message": "🔄 AI株式リサーチを更新しています...\n完了後にLINEにレポートをお送りします（3〜5分程度）。"}
 
 
 # ─────────────────────────────────────────

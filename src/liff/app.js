@@ -349,8 +349,9 @@ function showHoldingsList(data) {
   document.getElementById("resultMsg").className = "result-msg list";
   document.getElementById("resultArea").style.display = "block";
 
-  // 一覧表示時は「続けて追加」非表示・「戻る」表示
+  // 一覧表示時は「続けて追加」非表示・「更新」「戻る」表示
   document.getElementById("continueBtn").style.display = "none";
+  document.getElementById("refreshReportBtn").style.display = "block";
   document.getElementById("backBtn").style.display = "block";
 }
 
@@ -358,6 +359,7 @@ function showHoldingsList(data) {
 document.getElementById("backBtn").addEventListener("click", function () {
   cancelAutoClose();
   document.getElementById("resultArea").style.display = "none";
+  document.getElementById("refreshReportBtn").style.display = "none";
   document.getElementById("portfolioForm").style.display = "block";
   const action = document.getElementById("action").value;
   updateFormLayout(action);
@@ -383,5 +385,97 @@ document.getElementById("closeBtn").addEventListener("click", function () {
   liff.closeWindow();
 });
 
+// ─────────────────────────────────────────
+// AIレポート更新（/refresh エンドポイント呼び出し）
+// ─────────────────────────────────────────
+
+async function triggerRefresh() {
+  const accessToken = liff.getAccessToken();
+  if (!accessToken) {
+    showError("LIFFアクセストークンが取得できません。再ログインしてください。");
+    return;
+  }
+
+  const btn = document.getElementById("refreshReportBtn");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "更新リクエスト送信中...";
+  }
+
+  try {
+    const resp = await fetch(`${WEBHOOK_BASE_URL}/refresh`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${accessToken}`,
+      },
+    });
+    if (!resp.ok) {
+      const body = await resp.text();
+      throw new Error(`サーバーエラー (${resp.status}): ${body}`);
+    }
+    const data = await resp.json();
+    if (btn) {
+      btn.textContent = "✅ リクエスト送信済み";
+    }
+    alert(data.message || "更新リクエストを送信しました。");
+  } catch (err) {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "🔄 AIレポートを更新";
+    }
+    showError(err.message || "更新リクエストの送信に失敗しました。");
+  }
+}
+
+// mode=refresh でLIFFを開いた場合、自動的に更新を実行
+async function handleRefreshMode() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("mode") !== "refresh") return;
+
+  // フォームを隠して更新中メッセージを表示
+  document.getElementById("portfolioForm").style.display = "none";
+  const resultArea = document.getElementById("resultArea");
+  const resultMsg = document.getElementById("resultMsg");
+  resultMsg.textContent = "🔄 AIレポートの更新リクエストを送信しています...";
+  resultMsg.className = "result-msg";
+  document.getElementById("continueBtn").style.display = "none";
+  document.getElementById("backBtn").style.display = "none";
+  resultArea.style.display = "block";
+
+  const accessToken = liff.getAccessToken();
+  if (!accessToken) {
+    resultMsg.textContent = "⚠️ LIFFアクセストークンが取得できません。再ログインしてください。";
+    document.getElementById("backBtn").style.display = "block";
+    return;
+  }
+
+  try {
+    const resp = await fetch(`${WEBHOOK_BASE_URL}/refresh`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${accessToken}`,
+      },
+    });
+    if (!resp.ok) {
+      const body = await resp.text();
+      throw new Error(`サーバーエラー (${resp.status}): ${body}`);
+    }
+    const data = await resp.json();
+    resultMsg.textContent = data.message || "✅ 更新リクエストを送信しました。完了後にLINEにレポートが届きます。";
+    resultMsg.className = "result-msg success";
+    // 5秒後に自動クローズ
+    setTimeout(() => liff.closeWindow(), 5000);
+  } catch (err) {
+    resultMsg.textContent = `⚠️ 更新リクエストの送信に失敗しました: ${err.message}`;
+    resultMsg.className = "result-msg error";
+    document.getElementById("backBtn").style.display = "block";
+  }
+}
+
 // 初期化
-initLiff();
+(async () => {
+  await initLiff();
+  handleRefreshMode();
+})();

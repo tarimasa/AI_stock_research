@@ -188,6 +188,28 @@ button[type="submit"]:disabled {
   background: #f0f4f8;
 }
 
+.btn-refresh {
+  flex: 1;
+  padding: 13px;
+  background: #1a6b3a;
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-refresh:hover {
+  background: #22883f;
+}
+
+.btn-refresh:disabled {
+  background: #aaa;
+  cursor: not-allowed;
+}
+
 /* ── 一覧ヘッダー ── */
 .list-header { margin-bottom: 6px; }
 

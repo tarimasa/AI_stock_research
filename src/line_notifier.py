@@ -118,9 +118,9 @@ def build_flex_message(report_text: str) -> dict:
                     {
                         "type": "button",
                         "action": {
-                            "type": "message",
-                            "label": "🔄 情報を更新",
-                            "text": "更新",
+                            "type": "uri",
+                            "label": "🔄 AIレポートを更新",
+                            "uri": LIFF_URL + "?mode=refresh",
                         },
                         "style": "primary",
                         "color": "#1E3A5F",
