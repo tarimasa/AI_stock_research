@@ -36,7 +36,7 @@ jobs:
         run: |
           IMAGE="${{ secrets.ACR_NAME }}.azurecr.io/ai-stock-bot:${{ github.sha }}"
 
-          # ACR の管理者ユーザー名・パスワードを取得してレジストリ認証を設定
+          # ACR の管理者ユーザー名・パスワードを取得
           ACR_USERNAME=$(az acr credential show \
             --name ${{ secrets.ACR_NAME }} \
             --query username -o tsv)
@@ -44,13 +44,19 @@ jobs:
             --name ${{ secrets.ACR_NAME }} \
             --query "passwords[0].value" -o tsv)
 
+          # az containerapp update はレジストリ認証オプション非対応のため
+          # registry set で認証を設定してから image のみ更新する
+          az containerapp registry set \
+            --name ${{ secrets.CONTAINER_APP_NAME }} \
+            --resource-group ${{ secrets.RESOURCE_GROUP }} \
+            --server "${{ secrets.ACR_NAME }}.azurecr.io" \
+            --username "$ACR_USERNAME" \
+            --password "$ACR_PASSWORD"
+
           az containerapp update \
             --name ${{ secrets.CONTAINER_APP_NAME }} \
             --resource-group ${{ secrets.RESOURCE_GROUP }} \
-            --image "$IMAGE" \
-            --registry-server "${{ secrets.ACR_NAME }}.azurecr.io" \
-            --registry-username "$ACR_USERNAME" \
-            --registry-password "$ACR_PASSWORD"
+            --image "$IMAGE"
 
       - name: デプロイ完了確認
         run: |
