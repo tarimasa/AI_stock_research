@@ -18,6 +18,7 @@ import line_notifier
 import news_fetcher
 import portfolio_tracker
 import screener
+import signal_tracker
 
 
 def _load_watchlist() -> dict:
@@ -34,14 +35,18 @@ def run_report() -> None:
     stocks = watchlist["stocks"]
     print(f"[report] ウォッチリスト: {len(stocks)} 銘柄")
 
-    # Step 2: 市場データ取得
+    # Step 2: 市場データ取得（日経SMAトレンド含む）
     print("[report] 市場データ取得中...")
     market_data = data_fetcher.fetch_market_data()
-    print(f"[report] 日経平均: {market_data.get('nikkei')} ({market_data.get('nikkei_change')}%)")
+    print(
+        f"[report] 日経平均: {market_data.get('nikkei')} ({market_data.get('nikkei_change')}%) "
+        f"SMA25比: {market_data.get('nikkei_vs_sma25_pct'):+.1f}% "
+        f"トレンド: {market_data.get('nikkei_trend')}"
+    )
 
-    # Step 3: スクリーニング
+    # Step 3: スクリーニング（market_data を渡してトレンドフィルターを適用）
     print("[report] スクリーニング中...")
-    screened = screener.screen(stocks)
+    screened = screener.screen(stocks, market_data)
     print(f"[report] スクリーニング通過: {len(screened)} 銘柄")
 
     if not screened:
@@ -64,6 +69,24 @@ def run_report() -> None:
     print("[report] Claude による分析中...")
     analysis = claude_analyzer.analyze(enriched_stocks, market_data)
     print(f"[report] 市場状況: {analysis.get('market_condition')}")
+    # Claudeの分析結果にもトレンド情報を付与（signal_trackerが参照）
+    analysis["nikkei_trend"] = market_data.get("nikkei_trend", "")
+
+    # Step 5.5: 過去シグナルの結果更新 & 今日のシグナル記録
+    print("[report] シグナル記録・勝率更新中...")
+    try:
+        closed = signal_tracker.update_signal_outcomes()
+        signal_tracker.record_signals(analysis)
+        summary = signal_tracker.get_win_rate_summary()
+        win_rate_str = f"{summary['win_rate']}%" if summary["win_rate"] is not None else "集計中"
+        print(
+            f"[report] バックテスト: 勝率 {win_rate_str} "
+            f"(勝:{summary['wins']} 負:{summary['losses']} 保留:{summary['open']})"
+        )
+        if closed:
+            print(f"[report] 今回クローズ: {[s['code'] + '→' + s['status'] for s in closed]}")
+    except Exception as e:
+        print(f"[report] シグナル記録失敗（続行）: {e}")
 
     # Step 6: ポートフォリオ確認
     print("[report] ポートフォリオ確認中...")

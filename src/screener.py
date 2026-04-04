@@ -89,23 +89,38 @@ def score_stock(df: pd.DataFrame, info: dict) -> float:
     return score
 
 
-def screen(stocks: list) -> list:
-    """watchlist の全銘柄をスコアリングし上位 MAX_STOCKS 件を返す。"""
+def screen(stocks: list, market_data: dict | None = None) -> list:
+    """
+    watchlist の全銘柄をスコアリングし上位 MAX_STOCKS 件を返す。
+    market_data を渡すと日経トレンドによるフィルターが有効になる。
+    """
     if DRY_RUN:
         return _dummy_screen(stocks)
+
+    nikkei_trend = (market_data or {}).get("nikkei_trend", "不明")
+    nikkei_vs_sma25 = (market_data or {}).get("nikkei_vs_sma25_pct", 0)
+
+    # 日経が25日線を下回っている場合: スコアペナルティ＋最大銘柄数を半減
+    in_downtrend = (nikkei_trend == "下落")
+    max_stocks = max(1, MAX_STOCKS // 2) if in_downtrend else MAX_STOCKS
+    score_multiplier = 0.7 if in_downtrend else 1.0
+
+    if in_downtrend:
+        print(f"[screener] ⚠️ 日経下落トレンド（SMA25比 {nikkei_vs_sma25:+.1f}%）: "
+              f"最大銘柄数 {MAX_STOCKS}→{max_stocks}、スコア×{score_multiplier}")
 
     scored = []
     for stock in stocks:
         try:
             df = fetch_ohlcv(stock["code"])
             info = fetch_info(stock["code"])
-            s = score_stock(df, info)
+            s = score_stock(df, info) * score_multiplier
             if s > 0:
-                scored.append({**stock, "score": s})
+                scored.append({**stock, "score": round(s, 1)})
         except Exception as e:
             print(f"[screener] {stock['code']} スキップ: {e}")
 
-    return sorted(scored, key=lambda x: x["score"], reverse=True)[:MAX_STOCKS]
+    return sorted(scored, key=lambda x: x["score"], reverse=True)[:max_stocks]
 
 
 def _dummy_screen(stocks: list) -> list:

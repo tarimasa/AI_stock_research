@@ -67,11 +67,19 @@ JSON形式のみで出力すること（コードブロック不要）。
 
 def build_user_prompt(screened_stocks: list, market_data: dict) -> str:
     today = datetime.today().strftime("%Y-%m-%d")
+    nikkei_trend = market_data.get("nikkei_trend", "不明")
+    nikkei_vs_sma25 = market_data.get("nikkei_vs_sma25_pct", 0)
+    trend_note = f"／ 25日線比 {nikkei_vs_sma25:+.1f}% ／ トレンド: {nikkei_trend}"
+    downtrend_warning = (
+        "\n⚠️ 日経平均が25日移動平均を下回っています。全体相場が弱い環境です。"
+        "market_conditionは原則「悪化」または「注意」とし、「今すぐ買う」推奨は最小限にしてください。"
+        if nikkei_trend == "下落" else ""
+    )
     return f"""
 ## 本日の市場状況
-- 日経平均: {market_data.get('nikkei', 'N/A')}円（前日比{market_data.get('nikkei_change', 'N/A')}%）
+- 日経平均: {market_data.get('nikkei', 'N/A')}円（前日比{market_data.get('nikkei_change', 'N/A')}%{trend_note}）
 - ドル円: {market_data.get('usdjpy', 'N/A')}円
-- 分析日: {today}
+- 分析日: {today}{downtrend_warning}
 
 ## スクリーニング通過銘柄（上位{len(screened_stocks)}本）
 {json.dumps(screened_stocks, ensure_ascii=False, indent=2)}

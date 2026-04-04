@@ -139,19 +139,41 @@ def fetch_stock_data(ticker: str) -> dict:
 
 
 def fetch_market_data() -> dict:
-    """日経平均・ドル円などマクロ指標を返す。"""
+    """日経平均・ドル円などマクロ指標を返す。日経の25日SMAトレンドも含む。"""
     if DRY_RUN:
         return {
             "nikkei": 38500,
             "nikkei_change": -0.5,
             "usdjpy": 148.5,
+            "nikkei_sma25": 38000,
+            "nikkei_vs_sma25_pct": 1.3,
+            "nikkei_trend": "上昇",
         }
     nikkei_data = fetch_stock_data("^N225")
     usdjpy_data = fetch_stock_data("USDJPY=X")
+
+    # 日経25日移動平均との乖離でトレンドを判定
+    nikkei_sma25 = 0
+    nikkei_vs_sma25_pct = 0.0
+    nikkei_trend = "不明"
+    try:
+        nikkei_df = fetch_ohlcv("^N225", days=30)
+        if len(nikkei_df) >= 25:
+            nikkei_sma25 = round(float(nikkei_df["Close"].tail(25).mean()))
+            nikkei_price = nikkei_data.get("price", 0)
+            if nikkei_sma25 > 0:
+                nikkei_vs_sma25_pct = round((nikkei_price - nikkei_sma25) / nikkei_sma25 * 100, 2)
+                nikkei_trend = "上昇" if nikkei_price >= nikkei_sma25 else "下落"
+    except Exception as e:
+        print(f"[data_fetcher] 日経SMA25取得失敗: {e}")
+
     return {
         "nikkei": nikkei_data.get("price", 0),
         "nikkei_change": nikkei_data.get("change_pct", 0),
         "usdjpy": usdjpy_data.get("price", 0),
+        "nikkei_sma25": nikkei_sma25,
+        "nikkei_vs_sma25_pct": nikkei_vs_sma25_pct,
+        "nikkei_trend": nikkei_trend,
     }
 
 
