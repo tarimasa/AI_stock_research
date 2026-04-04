@@ -118,15 +118,15 @@ async function submitPortfolio(payload) {
   return resp.json();
 }
 
-/** 削除ラジオリストをレンダリング（holdings/list 両フォーマット対応） */
-function renderDeleteRadioList(holdings, fromListAction) {
+/** 削除チェックボックスリストをレンダリング（holdings/list 両フォーマット対応） */
+function renderDeleteCheckboxList(holdings, fromListAction) {
   const container = document.getElementById("deleteList");
   if (holdings.length === 0) {
     container.innerHTML = '<div class="delete-empty">📦 保有株がありません</div>';
     return;
   }
 
-  let html = '<div class="delete-label-title">削除する銘柄を選択</div>';
+  let html = '<div class="delete-label-title">削除する銘柄を選択（複数可）</div>';
   for (const h of holdings) {
     // list アクション応答は .T なし、holdings アクション応答は .T あり
     const code4 = fromListAction ? h.code : (h.code || "").replace(".T", "");
@@ -137,11 +137,11 @@ function renderDeleteRadioList(holdings, fromListAction) {
     const shares = Number(h.shares || 0).toLocaleString();
 
     html += `
-      <label class="delete-radio-item">
-        <input type="radio" name="holdingId"
+      <label class="delete-check-item">
+        <input type="checkbox" class="delete-checkbox"
                value="${esc(holdingId)}"
                data-code="${esc(code4)}" />
-        <span class="delete-radio-label">
+        <span class="delete-check-label">
           <span class="delete-code">${esc(code4)}</span>
           <span class="delete-name">${esc(h.name || "")}</span>
           <span class="delete-price">¥${price}（${shares}株）</span>
@@ -149,9 +149,10 @@ function renderDeleteRadioList(holdings, fromListAction) {
       </label>`;
   }
   container.innerHTML = html;
-  container.querySelectorAll('input[type="radio"]').forEach(radio => {
-    radio.addEventListener("change", () => {
-      document.getElementById("submitBtn").disabled = false;
+  container.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+    cb.addEventListener("change", () => {
+      const anyChecked = container.querySelectorAll('input[type="checkbox"]:checked').length > 0;
+      document.getElementById("submitBtn").disabled = !anyChecked;
     });
   });
 }
@@ -166,14 +167,14 @@ async function loadHoldingsForDelete() {
   // 新API (holdings) を試み、失敗したら旧API (list) にフォールバック
   try {
     const data = await submitPortfolio({ action: "holdings" });
-    renderDeleteRadioList(data.holdings || [], false);
+    renderDeleteCheckboxList(data.holdings || [], false);
     return;
   } catch (_) { /* fall through */ }
 
   try {
     const data = await submitPortfolio({ action: "list" });
     const holdings = (data.holdings_data && data.holdings_data.holdings) || [];
-    renderDeleteRadioList(holdings, true);
+    renderDeleteCheckboxList(holdings, true);
   } catch (err) {
     container.innerHTML = `<div class="delete-error">⚠️ 読み込み失敗: ${esc(err.message)}</div>`;
   }
@@ -231,15 +232,31 @@ document.getElementById("portfolioForm").addEventListener("submit", async functi
   const payload = { action };
 
   if (action === "remove") {
-    const selected = document.querySelector('input[name="holdingId"]:checked');
-    if (!selected) {
+    const checked = [...document.querySelectorAll('.delete-checkbox:checked')];
+    if (checked.length === 0) {
       showError("削除する銘柄を選択してください。");
       return;
     }
-    // holding_id: 新サーバーが個別識別に使用
-    // code: 旧サーバー互換（code のみで削除する旧ロジック向け）
-    payload.holding_id = selected.value;
-    payload.code = selected.dataset.code;
+
+    const submitBtn = document.getElementById("submitBtn");
+    submitBtn.disabled = true;
+    submitBtn.textContent = "送信中...";
+
+    try {
+      for (const cb of checked) {
+        await submitPortfolio({
+          action: "remove",
+          holding_id: cb.value,
+          code: cb.dataset.code,
+        });
+      }
+      showResult(`${checked.length}件を削除しました。`, "success", action);
+    } catch (err) {
+      showError(err.message || "送信に失敗しました。もう一度お試しください。");
+      submitBtn.disabled = false;
+      submitBtn.textContent = "🗑️ 削除する";
+    }
+    return;
   } else if (action !== "list") {
     payload.code = code;
     if (action === "add") {

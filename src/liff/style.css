@@ -339,7 +339,7 @@ button[type="submit"]:disabled {
   flex: 0 0 auto;
 }
 
-/* ── 削除ラジオリスト ── */
+/* ── 削除チェックボックスリスト ── */
 .delete-label-title {
   font-size: 0.82rem;
   font-weight: 700;
@@ -348,7 +348,7 @@ button[type="submit"]:disabled {
   display: block;
 }
 
-.delete-radio-item {
+.delete-check-item {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -360,12 +360,12 @@ button[type="submit"]:disabled {
   transition: border-color 0.15s, background 0.15s;
 }
 
-.delete-radio-item:has(input:checked) {
+.delete-check-item:has(input:checked) {
   border-color: #c0392b;
   background: #fdf0ef;
 }
 
-.delete-radio-item input[type="radio"] {
+.delete-check-item input[type="checkbox"] {
   width: 18px;
   height: 18px;
   accent-color: #c0392b;
@@ -373,7 +373,7 @@ button[type="submit"]:disabled {
   cursor: pointer;
 }
 
-.delete-radio-label {
+.delete-check-label {
   display: flex;
   align-items: center;
   gap: 8px;
