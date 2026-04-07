@@ -135,22 +135,37 @@ function renderDeleteCheckboxList(holdings, fromListAction) {
     const holdingId = (!fromListAction && h.id) ? h.id : `${codeWithT}:${h.buy_price}`;
     const price = Number(h.buy_price || 0).toLocaleString();
     const shares = Number(h.shares || 0).toLocaleString();
+    const inputId = `sell-price-${esc(holdingId).replace(/[^a-zA-Z0-9]/g, "_")}`;
 
     html += `
-      <label class="delete-check-item">
-        <input type="checkbox" class="delete-checkbox"
-               value="${esc(holdingId)}"
-               data-code="${esc(code4)}" />
-        <span class="delete-check-label">
-          <span class="delete-code">${esc(code4)}</span>
-          <span class="delete-name">${esc(h.name || "")}</span>
-          <span class="delete-price">¥${price}（${shares}株）</span>
-        </span>
-      </label>`;
+      <div class="delete-item-wrap">
+        <label class="delete-check-item">
+          <input type="checkbox" class="delete-checkbox"
+                 value="${esc(holdingId)}"
+                 data-code="${esc(code4)}"
+                 data-input-id="${inputId}" />
+          <span class="delete-check-label">
+            <span class="delete-code">${esc(code4)}</span>
+            <span class="delete-name">${esc(h.name || "")}</span>
+            <span class="delete-price">取得¥${price}（${shares}株）</span>
+          </span>
+        </label>
+        <div class="delete-sell-price-wrap" id="${inputId}" style="display:none;">
+          <label class="delete-sell-label">売却価格（円）</label>
+          <input type="number" class="delete-sell-input" min="1" step="1"
+                 placeholder="例: 2800（空欄で現在値を自動取得）"
+                 inputmode="numeric" />
+        </div>
+      </div>`;
   }
   container.innerHTML = html;
   container.querySelectorAll('input[type="checkbox"]').forEach(cb => {
     cb.addEventListener("change", () => {
+      // チェック状態に応じて売却価格入力欄を表示/非表示
+      const wrapId = cb.dataset.inputId;
+      const wrap = document.getElementById(wrapId);
+      if (wrap) wrap.style.display = cb.checked ? "block" : "none";
+
       const anyChecked = container.querySelectorAll('input[type="checkbox"]:checked').length > 0;
       document.getElementById("submitBtn").disabled = !anyChecked;
     });
@@ -244,11 +259,19 @@ document.getElementById("portfolioForm").addEventListener("submit", async functi
 
     try {
       for (const cb of checked) {
-        await submitPortfolio({
+        const wrapId = cb.dataset.inputId;
+        const wrap = document.getElementById(wrapId);
+        const sellInput = wrap ? wrap.querySelector(".delete-sell-input") : null;
+        const sellPriceVal = sellInput ? parseInt(sellInput.value) : NaN;
+        const payload = {
           action: "remove",
           holding_id: cb.value,
           code: cb.dataset.code,
-        });
+        };
+        if (!isNaN(sellPriceVal) && sellPriceVal > 0) {
+          payload.sell_price = sellPriceVal;
+        }
+        await submitPortfolio(payload);
       }
       showResult(`${checked.length}件を削除しました。`, "success", action);
     } catch (err) {

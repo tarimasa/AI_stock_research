@@ -2,9 +2,11 @@
 screener.py
 スコアリングにより Claude API に渡す銘柄を上位 MAX_STOCKS 本に絞る。
 pandas_ta を使ってテクニカル指標を計算する。
+ThreadPoolExecutor による並列フェッチで 50〜100 銘柄を高速処理。
 """
 
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import pandas_ta as ta
@@ -16,16 +18,19 @@ load_dotenv()
 
 MAX_STOCKS = int(os.environ.get("MAX_STOCKS_TO_ANALYZE", 10))
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
+# 並列ワーカー数: yfinance のレートリミットを考慮して 6 に設定。
+# 環境変数 SCREENER_WORKERS で上書き可能。
+SCREENER_WORKERS = int(os.environ.get("SCREENER_WORKERS", 6))
 
 
-def score_stock(df: pd.DataFrame, info: dict) -> float:
+def score_stock(df: pd.DataFrame, info: dict) -> tuple[float, dict]:
     """
-    df: yfinance から取得した日足 OHLCV データ（直近 90 日分）
-    info: yfinance ticker.info（PER, PBR 等）
-    Returns: 0〜110 のスコア
+    df: yfinance から取得した日足 OHLCV データ（直近 252 日分）
+    info: yfinance ticker.info（PER, PBR, 配当利回り等）
+    Returns: (スコア 0〜175, 追加シグナル dict)
     """
     if df.empty or len(df) < 26:
-        return 0.0
+        return 0.0, {}
 
     score = 0.0
 
@@ -45,22 +50,23 @@ def score_stock(df: pd.DataFrame, info: dict) -> float:
     macd_signal = float(latest.get("MACDs_12_26_9", 0) or 0)
     bb_lower = float(latest.get("BBL_20_2.0", 0) or 0)
     sma25 = float(latest.get("SMA_25", close) or close)
-    # sma75 は 75 日未満のデータでは NaN になる場合がある
     sma75_raw = latest.get("SMA_75")
     sma75 = float(sma75_raw) if sma75_raw and not pd.isna(sma75_raw) else close
 
     ma25_diff_pct = (close - sma25) / sma25 * 100 if sma25 else 0
 
-    # RSI スコア（40点）
+    # ── 既存スコア ──────────────────────────────────
+
+    # RSI スコア（40点）: 売られすぎ圏を高評価
     if 25 <= rsi <= 35:
         score += 40
     elif 35 < rsi <= 50:
         score += 25
     elif 50 < rsi <= 65:
         score += 10
-    # RSI > 70 は除外（過熱圏）
+    # RSI > 70 は加点なし（過熱圏）
 
-    # MA 乖離スコア（25点）
+    # MA 乖離スコア（25点）: 25日線を少し下回った押し目
     if -8 <= ma25_diff_pct <= -4:
         score += 25
     elif -4 < ma25_diff_pct <= -2:
@@ -74,11 +80,11 @@ def score_stock(df: pd.DataFrame, info: dict) -> float:
     elif macd > 0:
         score += 10
 
-    # ボリンジャーバンド（15点）
+    # ボリンジャーバンド（15点）: 下限タッチで反発期待
     if bb_lower and close <= bb_lower:
         score += 15
 
-    # ファンダメンタルズボーナス（最大10点）
+    # ファンダメンタルズ（最大10点）
     per = info.get("trailingPE") or 999
     pbr = info.get("priceToBook") or 999
     if per < 15:
@@ -86,13 +92,84 @@ def score_stock(df: pd.DataFrame, info: dict) -> float:
     if pbr < 1.5:
         score += 5
 
-    return score
+    # ── 追加スコア（新規） ──────────────────────────
+
+    # 出来高比率（最大20点）: 20日平均比で今日の出来高が急増 → 資金流入シグナル
+    vol_ratio = 1.0
+    if "Volume" in df.columns and len(df) >= 20:
+        vol_mean20 = df["Volume"].iloc[-21:-1].mean()
+        if vol_mean20 > 0:
+            vol_ratio = float(latest["Volume"]) / vol_mean20
+        if vol_ratio >= 2.0:
+            score += 20  # 2倍以上の急増出来高
+        elif vol_ratio >= 1.5:
+            score += 12
+        elif vol_ratio >= 1.2:
+            score += 6
+
+    # 52週安値圏スコア（最大25点）: 年間安値に近いほど割安
+    week52_pos = 0.5  # デフォルト中央
+    if len(df) >= 60:
+        high52 = df["High"].max()
+        low52 = df["Low"].min()
+        if high52 > low52:
+            week52_pos = (close - low52) / (high52 - low52)
+        if week52_pos < 0.20:
+            score += 25  # 52週安値圏20%以内
+        elif week52_pos < 0.35:
+            score += 15
+        elif week52_pos < 0.50:
+            score += 8
+
+    # 配当利回りボーナス（最大15点）: 高配当は値下がりリスク軽減
+    div_yield = info.get("dividendYield") or 0
+    if div_yield >= 0.04:
+        score += 15  # 4%以上
+    elif div_yield >= 0.03:
+        score += 10  # 3%以上
+    elif div_yield >= 0.02:
+        score += 5   # 2%以上
+
+    # 75日線との位置（10点）: 25日線は下 × 75日線は上 = 短期調整の押し目
+    if sma75 and close < sma25 and close > sma75:
+        score += 10
+
+    extra_signals = {
+        "vol_ratio": round(vol_ratio, 2),
+        "week52_pos_pct": round(week52_pos * 100, 1),
+        "div_yield_pct": round(div_yield * 100, 2),
+        "ma25_diff_pct": round(ma25_diff_pct, 1),
+    }
+
+    return score, extra_signals
+
+
+def _fetch_and_score(stock: dict, score_multiplier: float) -> dict | None:
+    """単一銘柄のデータ取得・スコアリング（ThreadPoolExecutor から呼ばれる）。"""
+    try:
+        df = fetch_ohlcv(stock["code"], days=252)
+        info = fetch_info(stock["code"])
+        s, extra = score_stock(df, info)
+        s *= score_multiplier
+        if s > 0:
+            return {**stock, "score": round(s, 1), **extra}
+    except Exception as e:
+        print(f"[screener] {stock['code']} スキップ: {e}")
+    return None
 
 
 def screen(stocks: list, market_data: dict | None = None) -> list:
     """
-    watchlist の全銘柄をスコアリングし上位 MAX_STOCKS 件を返す。
+    watchlist の全銘柄を並列スコアリングし上位 MAX_STOCKS 件を返す。
+
+    処理時間の目安（SCREENER_WORKERS=6 の場合）:
+      ~30銘柄  → 約 20〜40 秒
+      ~50銘柄  → 約 30〜60 秒
+      ~100銘柄 → 約 60〜120 秒
+    いずれも GitHub Actions の 30 分タイムアウト以内に収まる。
+
     market_data を渡すと日経トレンドによるフィルターが有効になる。
+    重複コードを自動除去してから処理する。
     """
     if DRY_RUN:
         return _dummy_screen(stocks)
@@ -109,26 +186,51 @@ def screen(stocks: list, market_data: dict | None = None) -> list:
         print(f"[screener] ⚠️ 日経下落トレンド（SMA25比 {nikkei_vs_sma25:+.1f}%）: "
               f"最大銘柄数 {MAX_STOCKS}→{max_stocks}、スコア×{score_multiplier}")
 
-    scored = []
-    for stock in stocks:
-        try:
-            df = fetch_ohlcv(stock["code"])
-            info = fetch_info(stock["code"])
-            s = score_stock(df, info) * score_multiplier
-            if s > 0:
-                scored.append({**stock, "score": round(s, 1)})
-        except Exception as e:
-            print(f"[screener] {stock['code']} スキップ: {e}")
+    # 重複コードを除去
+    seen_codes: set = set()
+    unique_stocks = []
+    for s in stocks:
+        if s["code"] not in seen_codes:
+            seen_codes.add(s["code"])
+            unique_stocks.append(s)
 
-    return sorted(scored, key=lambda x: x["score"], reverse=True)[:max_stocks]
+    print(f"[screener] {len(unique_stocks)}銘柄を並列スクリーニング開始 "
+          f"(workers={SCREENER_WORKERS})")
+
+    scored = []
+    with ThreadPoolExecutor(max_workers=SCREENER_WORKERS) as executor:
+        futures = {
+            executor.submit(_fetch_and_score, stock, score_multiplier): stock
+            for stock in unique_stocks
+        }
+        for future in as_completed(futures):
+            result = future.result()
+            if result is not None:
+                scored.append(result)
+
+    result_sorted = sorted(scored, key=lambda x: x["score"], reverse=True)[:max_stocks]
+    print(f"[screener] スクリーニング完了: {len(scored)}/{len(unique_stocks)}銘柄スコアあり → "
+          f"上位{len(result_sorted)}銘柄をClaudeに渡す")
+    return result_sorted
 
 
 def _dummy_screen(stocks: list) -> list:
     """DRY_RUN 用のダミースクリーニング結果。"""
-    dummy_scores = [45, 40, 35, 30, 25, 20, 15, 10, 5, 0]
+    dummy_scores = [95, 80, 70, 60, 55, 45, 40, 35, 25, 15]
     result = []
+    seen: set = set()
     for i, stock in enumerate(stocks):
-        score = dummy_scores[i] if i < len(dummy_scores) else 0
+        if stock["code"] in seen:
+            continue
+        seen.add(stock["code"])
+        score = dummy_scores[len(result)] if len(result) < len(dummy_scores) else 0
         if score > 0:
-            result.append({**stock, "score": score})
+            result.append({
+                **stock,
+                "score": score,
+                "vol_ratio": 1.4,
+                "week52_pos_pct": 28.0,
+                "div_yield_pct": 2.5,
+                "ma25_diff_pct": -3.2,
+            })
     return result[:MAX_STOCKS]
