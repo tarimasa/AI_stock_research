@@ -249,11 +249,18 @@ def execute_command(cmd: dict) -> str:
         if not target:
             return "⚠️ 指定された銘柄が見つかりません。"
 
-        try:
-            stock_data = data_fetcher.fetch_stock_data(target["code"])
-            current = stock_data.get("price", target["buy_price"])
-        except Exception:
-            current = target["buy_price"]
+        # 売却価格: LIFF から手動入力された値を優先、なければ現在値を自動取得
+        sell_price_input = cmd.get("sell_price")
+        if sell_price_input and int(sell_price_input) > 0:
+            current = int(sell_price_input)
+            price_source = "手動入力"
+        else:
+            try:
+                stock_data = data_fetcher.fetch_stock_data(target["code"])
+                current = stock_data.get("price", target["buy_price"])
+            except Exception:
+                current = target["buy_price"]
+            price_source = "現在値"
         pnl = (current - target["buy_price"]) * target["shares"]
         pnl_pct = (current - target["buy_price"]) / target["buy_price"] * 100
 
@@ -275,7 +282,8 @@ def execute_command(cmd: dict) -> str:
         portfolio["holdings"] = new_holdings
         portfolio_store.save_portfolio(portfolio)
         return (
-            f"🗑️ {target['name']}（¥{target['buy_price']:,}）を削除しました\n"
+            f"🗑️ {target['name']}（取得¥{target['buy_price']:,}）を削除しました\n"
+            f"売却価格: ¥{current:,}（{price_source}）\n"
             f"売却損益: {pnl:+,.0f}円（{pnl_pct:+.1f}%）\n"
             f"保有期間: {days}日間"
         )

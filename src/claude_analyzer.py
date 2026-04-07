@@ -22,17 +22,30 @@ SYSTEM_PROMPT = """
 ユーザーはSBI証券でIFDOCO注文（指値買い→利確指値＋損切り逆指値の同時発注）を使います。
 以下のルールを必ず守って分析・推奨を行ってください。
 
-【出力ルール】
+【選定ルール】
 1. 推奨銘柄を1〜3本に必ず絞ること（多すぎると初心者が迷うため）
-2. 各銘柄について「今すぐ買う」「押し目待ち」「見送り」の3択で明確に分類すること
-3. 推奨理由は平易な言葉で2〜3文に収めること
-4. リスクを★1〜3で示すこと（★1:低リスク、★3:高リスク）
-5. 目標株価を必ず提示すること
-6. 相場全体が悪い場合は「本日は買い見送り推奨」と明示すること
-7. IFDOCO注文用に以下の3価格を必ず算出すること（10円単位で丸める）
+2. 必ず**異なるセクター**から選ぶこと（同セクターの銘柄を複数推奨しない）
+3. 以下の追加指標を積極的に活用し、テクニカルだけでなく多面的に判断すること：
+   - vol_ratio（出来高比率）: 1.5以上は資金流入シグナル、特に安値圏での急増は強いサイン
+   - week52_pos_pct（52週レンジ位置）: 30%以下は年間安値圏の割安水準
+   - div_yield_pct（配当利回り）: 3%以上は下値リスクを軽減する安全網
+   - ma25_diff_pct（25日線乖離率）: -4%以下の調整は押し目買いチャンス
+4. スコアだけでなく**出来高急増×安値圏**など複合シグナルを重視すること
+5. 同じ銘柄（特にトヨタ・ソフトバンク・NTT・ソニー）を毎回選ばないこと。
+   スコア上位でも前回と異なる視点・銘柄で提案を試みること。
+
+【分類ルール】
+6. 各銘柄について「今すぐ買う」「押し目待ち」「見送り」の3択で明確に分類すること
+7. 推奨理由は平易な言葉で2〜3文に収め、どの指標が決め手かを必ず言及すること
+8. リスクを★1〜3で示すこと（★1:低リスク、★3:高リスク）
+9. 目標株価を必ず提示すること（根拠：過去レジスタンス、52週高値、PER適正水準等）
+10. 相場全体が悪い場合は「本日は買い見送り推奨」と明示すること
+
+【IFDOCO価格算出ルール】
+11. IFDOCO注文用に以下の3価格を必ず算出すること（10円単位で丸める）
    - buy_price: 指値買い価格
-     「今すぐ買う」→ 現在値の-0.5〜-1.0%（小さめの指値でスリッページ回避）
-     「押し目待ち」→ 25日移動平均線付近（SMA25 または現在値の-2〜-4%）
+     「今すぐ買う」→ 現在値の-0.5〜-1.0%
+     「押し目待ち」→ SMA25 または現在値の-2〜-4%
    - take_profit_price: 利確売り指値（= target_price と同じ）
    - stop_loss_price: 損切り逆指値
      buy_price × (1 - stop_loss_pct/100) で算出。
@@ -48,6 +61,7 @@ JSON形式のみで出力すること（コードブロック不要）。
       "rank": 1,
       "code": "7203.T",
       "name": "トヨタ自動車",
+      "sector": "自動車",
       "action": "今すぐ買う|押し目待ち|見送り",
       "current_price": 2850,
       "buy_price": 2830,
@@ -55,7 +69,8 @@ JSON形式のみで出力すること（コードブロック不要）。
       "take_profit_price": 3100,
       "stop_loss_price": 2610,
       "upside_pct": 8.8,
-      "reason": "推奨理由（2〜3文）",
+      "reason": "推奨理由（2〜3文、決め手となった指標を必ず言及）",
+      "key_signal": "出来高1.8倍×52週安値圏25%",
       "risk_level": 2,
       "risk_comment": "リスクの内容"
     }
@@ -75,16 +90,41 @@ def build_user_prompt(screened_stocks: list, market_data: dict) -> str:
         "market_conditionは原則「悪化」または「注意」とし、「今すぐ買う」推奨は最小限にしてください。"
         if nikkei_trend == "下落" else ""
     )
+    # 各銘柄の追加シグナルを読みやすく整形
+    signals_summary = []
+    for s in screened_stocks:
+        sig_parts = []
+        vol = s.get("vol_ratio")
+        if vol is not None:
+            sig_parts.append(f"出来高比率:{vol}倍")
+        pos = s.get("week52_pos_pct")
+        if pos is not None:
+            sig_parts.append(f"52週レンジ位置:{pos}%")
+        div = s.get("div_yield_pct")
+        if div is not None:
+            sig_parts.append(f"配当利回り:{div}%")
+        ma = s.get("ma25_diff_pct")
+        if ma is not None:
+            sig_parts.append(f"25日線乖離:{ma:+.1f}%")
+        signals_summary.append(f"  {s['code']} {s['name']}（{s.get('sector','')}）スコア{s.get('score',0)}: {', '.join(sig_parts)}")
+
+    signals_text = "\n".join(signals_summary) if signals_summary else "  （追加シグナルなし）"
+
     return f"""
 ## 本日の市場状況
 - 日経平均: {market_data.get('nikkei', 'N/A')}円（前日比{market_data.get('nikkei_change', 'N/A')}%{trend_note}）
 - ドル円: {market_data.get('usdjpy', 'N/A')}円
 - 分析日: {today}{downtrend_warning}
 
-## スクリーニング通過銘柄（上位{len(screened_stocks)}本）
+## スクリーニング通過銘柄（上位{len(screened_stocks)}本）の追加シグナル要約
+{signals_text}
+
+## スクリーニング通過銘柄の詳細データ
 {json.dumps(screened_stocks, ensure_ascii=False, indent=2)}
 
-上記データをもとに、初心者投資家向けの推奨レポートをJSON形式で生成してください。
+上記データをもとに、セクターが重複しないよう注意しながら、
+初心者投資家向けの推奨レポートをJSON形式で生成してください。
+特に出来高急増・52週安値圏・高配当などの複合シグナルを重視してください。
 """
 
 

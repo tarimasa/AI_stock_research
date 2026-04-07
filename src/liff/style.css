@@ -426,6 +426,52 @@ button[type="submit"]:disabled {
   flex-shrink: 0;
 }
 
+/* 売却価格入力エリア */
+.delete-item-wrap {
+  margin-bottom: 8px;
+}
+
+.delete-item-wrap .delete-check-item {
+  margin-bottom: 0;
+  border-radius: 10px 10px 0 0;
+}
+
+.delete-item-wrap .delete-check-item:has(input:not(:checked)) {
+  border-radius: 10px;
+}
+
+.delete-sell-price-wrap {
+  border: 1.5px solid #c0392b;
+  border-top: none;
+  border-radius: 0 0 10px 10px;
+  padding: 10px 12px;
+  background: #fdf0ef;
+}
+
+.delete-sell-label {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #c0392b;
+  margin-bottom: 6px;
+}
+
+.delete-sell-input {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1.5px solid #e8b4b0;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  background: #fff;
+  transition: border-color 0.2s;
+}
+
+.delete-sell-input:focus {
+  outline: none;
+  border-color: #c0392b;
+  box-shadow: 0 0 0 3px rgba(192, 57, 43, 0.1);
+}
+
 .delete-loading,
 .delete-empty,
 .delete-error {
