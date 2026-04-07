@@ -2,9 +2,11 @@
 screener.py
 スコアリングにより Claude API に渡す銘柄を上位 MAX_STOCKS 本に絞る。
 pandas_ta を使ってテクニカル指標を計算する。
+ThreadPoolExecutor による並列フェッチで 50〜100 銘柄を高速処理。
 """
 
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import pandas_ta as ta
@@ -16,6 +18,9 @@ load_dotenv()
 
 MAX_STOCKS = int(os.environ.get("MAX_STOCKS_TO_ANALYZE", 10))
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
+# 並列ワーカー数: yfinance のレートリミットを考慮して 6 に設定。
+# 環境変数 SCREENER_WORKERS で上書き可能。
+SCREENER_WORKERS = int(os.environ.get("SCREENER_WORKERS", 6))
 
 
 def score_stock(df: pd.DataFrame, info: dict) -> tuple[float, dict]:
@@ -139,9 +144,30 @@ def score_stock(df: pd.DataFrame, info: dict) -> tuple[float, dict]:
     return score, extra_signals
 
 
+def _fetch_and_score(stock: dict, score_multiplier: float) -> dict | None:
+    """単一銘柄のデータ取得・スコアリング（ThreadPoolExecutor から呼ばれる）。"""
+    try:
+        df = fetch_ohlcv(stock["code"], days=252)
+        info = fetch_info(stock["code"])
+        s, extra = score_stock(df, info)
+        s *= score_multiplier
+        if s > 0:
+            return {**stock, "score": round(s, 1), **extra}
+    except Exception as e:
+        print(f"[screener] {stock['code']} スキップ: {e}")
+    return None
+
+
 def screen(stocks: list, market_data: dict | None = None) -> list:
     """
-    watchlist の全銘柄をスコアリングし上位 MAX_STOCKS 件を返す。
+    watchlist の全銘柄を並列スコアリングし上位 MAX_STOCKS 件を返す。
+
+    処理時間の目安（SCREENER_WORKERS=6 の場合）:
+      ~30銘柄  → 約 20〜40 秒
+      ~50銘柄  → 約 30〜60 秒
+      ~100銘柄 → 約 60〜120 秒
+    いずれも GitHub Actions の 30 分タイムアウト以内に収まる。
+
     market_data を渡すと日経トレンドによるフィルターが有効になる。
     重複コードを自動除去してから処理する。
     """
@@ -168,20 +194,24 @@ def screen(stocks: list, market_data: dict | None = None) -> list:
             seen_codes.add(s["code"])
             unique_stocks.append(s)
 
-    scored = []
-    for stock in unique_stocks:
-        try:
-            # 52週スコア用に250日分取得（既存の90日から拡張）
-            df = fetch_ohlcv(stock["code"], days=252)
-            info = fetch_info(stock["code"])
-            s, extra = score_stock(df, info)
-            s *= score_multiplier
-            if s > 0:
-                scored.append({**stock, "score": round(s, 1), **extra})
-        except Exception as e:
-            print(f"[screener] {stock['code']} スキップ: {e}")
+    print(f"[screener] {len(unique_stocks)}銘柄を並列スクリーニング開始 "
+          f"(workers={SCREENER_WORKERS})")
 
-    return sorted(scored, key=lambda x: x["score"], reverse=True)[:max_stocks]
+    scored = []
+    with ThreadPoolExecutor(max_workers=SCREENER_WORKERS) as executor:
+        futures = {
+            executor.submit(_fetch_and_score, stock, score_multiplier): stock
+            for stock in unique_stocks
+        }
+        for future in as_completed(futures):
+            result = future.result()
+            if result is not None:
+                scored.append(result)
+
+    result_sorted = sorted(scored, key=lambda x: x["score"], reverse=True)[:max_stocks]
+    print(f"[screener] スクリーニング完了: {len(scored)}/{len(unique_stocks)}銘柄スコアあり → "
+          f"上位{len(result_sorted)}銘柄をClaudeに渡す")
+    return result_sorted
 
 
 def _dummy_screen(stocks: list) -> list:
