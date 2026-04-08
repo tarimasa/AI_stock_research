@@ -7,6 +7,7 @@ ThreadPoolExecutor による並列フェッチで 50〜100 銘柄を高速処理
 
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, datetime
 
 import pandas as pd
 import pandas_ta as ta
@@ -121,23 +122,54 @@ def score_stock(df: pd.DataFrame, info: dict) -> tuple[float, dict]:
         elif week52_pos < 0.50:
             score += 8
 
-    # 配当利回りボーナス（最大15点）: 高配当は値下がりリスク軽減
-    div_yield = info.get("dividendYield") or 0
-    if div_yield >= 0.04:
-        score += 15  # 4%以上
-    elif div_yield >= 0.03:
-        score += 10  # 3%以上
-    elif div_yield >= 0.02:
-        score += 5   # 2%以上
+    # 配当利回り: スコアには使わない（短期売買が目的のため保持前提スコアは除外）
+    # ただし表示用に正規化して保持する
+    # バグ修正: yfinanceが日本株で百分率(5.59)を返す場合があるため小数に正規化
+    div_yield_raw = info.get("dividendYield") or 0
+    if div_yield_raw > 1.0:
+        # 5.59% → 0.0559 に補正（百分率で返ってきた場合の防御）
+        div_yield_raw /= 100
 
     # 75日線との位置（10点）: 25日線は下 × 75日線は上 = 短期調整の押し目
     if sma75 and close < sma25 and close > sma75:
         score += 10
 
+    # ── 配当権利確定日接近スコア（最大25点）────────────────────────
+    # 短期売買での活用理由:
+    #   権利付最終日の1〜2週前は機関投資家・個人投資家の「配当取り買い」で
+    #   統計的に有意な上昇バイアスが確認されている（Kato & Loewenstein 1995、
+    #   日本株の ex-day 前後の超過リターン研究）。
+    #   ※目的は配当受取ではなく、この「買い需要」を短期的に利用すること。
+    #   権利落ち後は買い圧力が消え価格調整が入るため、権利付最終日前後での売却を推奨。
+    # yfinance の exDividendDate は「権利落ち日」に相当（日本では権利付最終日の翌営業日）
+    days_to_ex = None
+    ex_div_score = 0
+    ex_date_ts = info.get("exDividendDate")
+    if ex_date_ts:
+        try:
+            if hasattr(ex_date_ts, "date"):
+                ex_date = ex_date_ts.date()
+            else:
+                ex_date = datetime.fromtimestamp(int(ex_date_ts)).date()
+            days_to_ex = (ex_date - date.today()).days
+            # 権利付最終日 = 権利落ち日の前営業日なので -1 で近似
+            days_to_last_buy = days_to_ex - 1
+            if 3 <= days_to_last_buy <= 10:
+                ex_div_score = 25   # 権利直前1〜2週: 買い需要ピーク
+            elif 11 <= days_to_last_buy <= 20:
+                ex_div_score = 18   # 2〜4週前: 機関の仕込み本格化
+            elif 21 <= days_to_last_buy <= 35:
+                ex_div_score = 10   # 1〜1.5ヶ月前: 先行買い開始
+            # 0以下（権利落ち後）や36日以上先はスコアなし
+            score += ex_div_score
+        except Exception:
+            pass
+
     extra_signals = {
         "vol_ratio": round(vol_ratio, 2),
         "week52_pos_pct": round(week52_pos * 100, 1),
-        "div_yield_pct": round(div_yield * 100, 2),
+        "days_to_ex_dividend": days_to_ex,   # 権利落ち日まで（負=過去、Noneは不明）
+        "div_yield_pct": round(div_yield_raw * 100, 2),  # 表示用のみ（スコア対象外）
         "ma25_diff_pct": round(ma25_diff_pct, 1),
     }
 
