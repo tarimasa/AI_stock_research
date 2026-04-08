@@ -24,11 +24,12 @@ DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 SCREENER_WORKERS = int(os.environ.get("SCREENER_WORKERS", 6))
 
 
-def score_stock(df: pd.DataFrame, info: dict) -> tuple[float, dict]:
+def score_stock(df: pd.DataFrame, info: dict, market_data: dict | None = None) -> tuple[float, dict]:
     """
     df: yfinance から取得した日足 OHLCV データ（直近 252 日分）
     info: yfinance ticker.info（PER, PBR, 配当利回り等）
-    Returns: (スコア 0〜175, 追加シグナル dict)
+    market_data: fetch_market_data() の結果（nikkei_return_20d, vix 等）
+    Returns: (スコア 0〜190, 追加シグナル dict)
     """
     if df.empty or len(df) < 26:
         return 0.0, {}
@@ -165,23 +166,46 @@ def score_stock(df: pd.DataFrame, info: dict) -> tuple[float, dict]:
         except Exception:
             pass
 
+    # ── 日経225比 相対強度スコア（最大15点）──────────────────────────
+    # 日経がx%下落した中で当該銘柄がより小さい下落 or 上昇 = 底堅さ → 反発期待
+    # 日経より大幅アンダーパフォーム（-5〜-15%）= 押し目・キャッチアップ余地
+    rel_strength = None
+    rel_strength_score = 0
+    nikkei_return_20d = (market_data or {}).get("nikkei_return_20d", 0)
+    if len(df) >= 20:
+        p_now = float(df["Close"].iloc[-1])
+        p_20d = float(df["Close"].iloc[-20])
+        stock_return_20d = (p_now - p_20d) / p_20d * 100 if p_20d > 0 else 0
+        rel_strength = round(stock_return_20d - nikkei_return_20d, 1)
+        # 小幅〜中幅アンダーパフォーム = 押し目でキャッチアップ期待
+        if -15 <= rel_strength <= -5:
+            rel_strength_score = 15
+        elif -5 < rel_strength < 0:
+            rel_strength_score = 8
+        elif 0 <= rel_strength <= 5:
+            rel_strength_score = 3
+        # rel_strength < -15: 何か問題がある可能性 → 加点なし
+        # rel_strength > 5: 既に先行している → 追いかけない
+        score += rel_strength_score
+
     extra_signals = {
         "vol_ratio": round(vol_ratio, 2),
         "week52_pos_pct": round(week52_pos * 100, 1),
-        "days_to_ex_dividend": days_to_ex,   # 権利落ち日まで（負=過去、Noneは不明）
+        "days_to_ex_dividend": days_to_ex,       # 権利落ち日まで（負=過去、Noneは不明）
         "div_yield_pct": round(div_yield_raw * 100, 2),  # 表示用のみ（スコア対象外）
         "ma25_diff_pct": round(ma25_diff_pct, 1),
+        "rel_strength_vs_nikkei": rel_strength,  # 日経比20日相対強度（%）
     }
 
     return score, extra_signals
 
 
-def _fetch_and_score(stock: dict, score_multiplier: float) -> dict | None:
+def _fetch_and_score(stock: dict, score_multiplier: float, market_data: dict | None = None) -> dict | None:
     """単一銘柄のデータ取得・スコアリング（ThreadPoolExecutor から呼ばれる）。"""
     try:
         df = fetch_ohlcv(stock["code"], days=252)
         info = fetch_info(stock["code"])
-        s, extra = score_stock(df, info)
+        s, extra = score_stock(df, info, market_data)
         s *= score_multiplier
         if s > 0:
             return {**stock, "score": round(s, 1), **extra}
@@ -232,7 +256,7 @@ def screen(stocks: list, market_data: dict | None = None) -> list:
     scored = []
     with ThreadPoolExecutor(max_workers=SCREENER_WORKERS) as executor:
         futures = {
-            executor.submit(_fetch_and_score, stock, score_multiplier): stock
+            executor.submit(_fetch_and_score, stock, score_multiplier, market_data): stock
             for stock in unique_stocks
         }
         for future in as_completed(futures):
@@ -262,7 +286,9 @@ def _dummy_screen(stocks: list) -> list:
                 "score": score,
                 "vol_ratio": 1.4,
                 "week52_pos_pct": 28.0,
+                "days_to_ex_dividend": 14,
                 "div_yield_pct": 2.5,
                 "ma25_diff_pct": -3.2,
+                "rel_strength_vs_nikkei": -6.8,
             })
     return result[:MAX_STOCKS]

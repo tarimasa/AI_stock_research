@@ -41,6 +41,11 @@ SYSTEM_PROMPT = """
      ・11〜20日前: 機関投資家の仕込み本格化
      ・21〜35日前: 先行買い開始期
    - ma25_diff_pct（25日線乖離率）: -4%以下の調整は押し目買いチャンス
+   - rel_strength_vs_nikkei（日経比20日相対強度）:
+     -15〜-5%: 日経より大幅アンダーパフォーム → 押し目、キャッチアップ期待
+     -5〜0%: 小幅アンダーパフォーム → 軽い遅れ、好転余地あり
+     0〜+5%: ほぼ同等 → 中立
+     +5%超: 既に先行 → 追いかけすぎに注意
 4. スコアだけでなく**出来高急増×安値圏×権利確定日接近**の複合シグナルを最重視すること
 5. 同じ銘柄（特にトヨタ・ソフトバンク・NTT・ソニー）を毎回選ばないこと。
    スコア上位でも前回と異なる視点・銘柄で提案を試みること。
@@ -54,15 +59,27 @@ SYSTEM_PROMPT = """
 9. 目標株価を必ず提示すること（根拠：過去レジスタンス、52週高値、PER適正水準等）
 10. 相場全体が悪い場合は「本日は買い見送り推奨」と明示すること
 
+【マクロ環境の解釈ルール】
+11. 提供されるマクロ指標を以下の通り解釈し、推奨・リスク評価に反映すること：
+   - VIX（恐怖指数）:
+     30超: 高恐怖環境 → stop_loss_pct を+2%広げること、リスク★を1段上げること
+     20-30: 警戒水準 → 通常より慎重に
+     20未満: 安定環境 → 通常のルール適用
+   - VIXトレンド「上昇中」: ボラティリティ拡大リスクあり → 利確目標を少し近くする
+   - 米10年国債利回りトレンド「上昇」: 円安バイアス → 輸出株（自動車・電機）に有利
+   - 米10年国債利回りトレンド「低下」: 円高リスク → 輸出株は慎重に
+   - Brent原油価格: エネルギー・化学セクターの推奨時に言及すること
+   - ダウ平均前日比がマイナス大: 米国市場の売りが翌朝の日本市場に波及する可能性あり
+
 【IFDOCO価格算出ルール】
-11. IFDOCO注文用に以下の3価格を必ず算出すること（10円単位で丸める）
+12. IFDOCO注文用に以下の3価格を必ず算出すること（10円単位で丸める）
    - buy_price: 指値買い価格
      「今すぐ買う」→ 現在値の-0.5〜-1.0%
      「押し目待ち」→ SMA25 または現在値の-2〜-4%
    - take_profit_price: 利確売り指値（= target_price と同じ）
    - stop_loss_price: 損切り逆指値
      buy_price × (1 - stop_loss_pct/100) で算出。
-     デフォルト stop_loss_pct=8。リスク★3なら10、★1なら5。
+     デフォルト stop_loss_pct=8。リスク★3なら10、★1なら5。VIX30超なら+2。
 
 【出力フォーマット】
 JSON形式のみで出力すること（コードブロック不要）。
@@ -104,6 +121,31 @@ def build_user_prompt(screened_stocks: list, market_data: dict) -> str:
         "market_conditionは原則「悪化」または「注意」とし、「今すぐ買う」推奨は最小限にしてください。"
         if nikkei_trend == "下落" else ""
     )
+
+    # マクロ環境サマリー
+    vix = market_data.get("vix", 0)
+    vix_trend = market_data.get("vix_trend", "不明")
+    us10y = market_data.get("us10y_yield", 0)
+    us10y_trend = market_data.get("us10y_trend", "不明")
+    oil = market_data.get("oil_brent", 0)
+    dow_change = market_data.get("dow_change", 0)
+
+    vix_comment = ""
+    if vix >= 30:
+        vix_comment = f"⚠️ VIX {vix}（高恐怖: {vix_trend}）→ 損切り幅を+2%広げること"
+    elif vix >= 20:
+        vix_comment = f"VIX {vix}（警戒水準: {vix_trend}）"
+    elif vix > 0:
+        vix_comment = f"VIX {vix}（安定: {vix_trend}）"
+
+    us10y_comment = ""
+    if us10y > 0:
+        if us10y_trend == "上昇":
+            us10y_comment = f"米10年債 {us10y}%（上昇中）→ 円安バイアス → 輸出株に有利"
+        elif us10y_trend == "低下":
+            us10y_comment = f"米10年債 {us10y}%（低下中）→ 円高リスク → 輸出株に逆風"
+        else:
+            us10y_comment = f"米10年債 {us10y}%（{us10y_trend}）"
     # 各銘柄の追加シグナルを読みやすく整形
     signals_summary = []
     for s in screened_stocks:
@@ -124,19 +166,36 @@ def build_user_prompt(screened_stocks: list, market_data: dict) -> str:
                 sig_parts.append(f"権利落ち後:{abs(days_ex)}日経過")
         div = s.get("div_yield_pct")
         if div is not None and div > 0:
-            sig_parts.append(f"配当利回り:{div}%（参考値・スコア対象外）")
+            sig_parts.append(f"配当利回り:{div}%（参考・スコア外）")
         ma = s.get("ma25_diff_pct")
         if ma is not None:
             sig_parts.append(f"25日線乖離:{ma:+.1f}%")
+        rs = s.get("rel_strength_vs_nikkei")
+        if rs is not None:
+            sig_parts.append(f"日経比20日相対強度:{rs:+.1f}%")
         signals_summary.append(f"  {s['code']} {s['name']}（{s.get('sector','')}）スコア{s.get('score',0)}: {', '.join(sig_parts)}")
 
     signals_text = "\n".join(signals_summary) if signals_summary else "  （追加シグナルなし）"
+
+    macro_lines = []
+    if vix_comment:
+        macro_lines.append(f"- 恐怖指数(VIX): {vix_comment}")
+    if us10y_comment:
+        macro_lines.append(f"- 米国債金利: {us10y_comment}")
+    if oil > 0:
+        macro_lines.append(f"- Brent原油: ${oil}（エネルギー・化学セクターに影響）")
+    if dow_change != 0:
+        macro_lines.append(f"- ダウ平均前日比: {dow_change:+.1f}%")
+    macro_text = "\n".join(macro_lines) if macro_lines else "- （マクロデータ取得なし）"
 
     return f"""
 ## 本日の市場状況
 - 日経平均: {market_data.get('nikkei', 'N/A')}円（前日比{market_data.get('nikkei_change', 'N/A')}%{trend_note}）
 - ドル円: {market_data.get('usdjpy', 'N/A')}円
 - 分析日: {today}{downtrend_warning}
+
+## クロスアセット・マクロ環境（推奨判断に反映すること）
+{macro_text}
 
 ## スクリーニング通過銘柄（上位{len(screened_stocks)}本）の追加シグナル要約
 {signals_text}
@@ -145,8 +204,9 @@ def build_user_prompt(screened_stocks: list, market_data: dict) -> str:
 {json.dumps(screened_stocks, ensure_ascii=False, indent=2)}
 
 上記データをもとに、セクターが重複しないよう注意しながら、
-初心者投資家向けの推奨レポートをJSON形式で生成してください。
-特に出来高急増・52週安値圏・高配当などの複合シグナルを重視してください。
+短期売買（数日〜2週間）の利益最大化を目的とした推奨レポートをJSON形式で生成してください。
+出来高急増・52週安値圏・権利確定日接近・日経比相対強度の複合シグナルを最重視してください。
+VIX・米金利・ドル円の方向性も必ずリスク評価に組み込んでください。
 """
 
 

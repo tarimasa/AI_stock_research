@@ -106,7 +106,7 @@ def fetch_stock_data_with_df(ticker: str) -> tuple[dict, pd.DataFrame]:
         "change_pct": round(change_pct, 2),
         "per": info.get("trailingPE"),
         "pbr": info.get("priceToBook"),
-        "dividend_yield": round((info.get("dividendYield") or 0) * 100, 2),
+        "dividend_yield": round(min((info.get("dividendYield") or 0), 1.0) * 100, 2),  # >1は%誤返却のため上限1.0
         "rsi_14": round(rsi_14, 1),
         "ma25_diff_pct": round(ma25_diff_pct, 2),
         "ma75_diff_pct": round(ma75_diff_pct, 2),
@@ -139,7 +139,15 @@ def fetch_stock_data(ticker: str) -> dict:
 
 
 def fetch_market_data() -> dict:
-    """日経平均・ドル円などマクロ指標を返す。日経の25日SMAトレンドも含む。"""
+    """
+    日経平均・ドル円などマクロ指標を返す。
+    追加データ:
+      - VIX (恐怖指数): 市場全体のリスク水準
+      - 米10年国債利回り: 円安/円高バイアスの先行指標
+      - Brent原油: エネルギー・化学セクターへの影響
+      - ダウ平均前日比: 米国市場の流れ
+      - nikkei_return_20d: 相対強度計算用（screener で使用）
+    """
     if DRY_RUN:
         return {
             "nikkei": 38500,
@@ -148,7 +156,15 @@ def fetch_market_data() -> dict:
             "nikkei_sma25": 38000,
             "nikkei_vs_sma25_pct": 1.3,
             "nikkei_trend": "上昇",
+            "nikkei_return_20d": -1.2,
+            "vix": 18.5,
+            "vix_trend": "低下",
+            "us10y_yield": 4.35,
+            "us10y_trend": "上昇",
+            "oil_brent": 82.0,
+            "dow_change": 0.3,
         }
+
     nikkei_data = fetch_stock_data("^N225")
     usdjpy_data = fetch_stock_data("USDJPY=X")
 
@@ -156,6 +172,7 @@ def fetch_market_data() -> dict:
     nikkei_sma25 = 0
     nikkei_vs_sma25_pct = 0.0
     nikkei_trend = "不明"
+    nikkei_return_20d = 0.0
     try:
         nikkei_df = fetch_ohlcv("^N225", days=30)
         if len(nikkei_df) >= 25:
@@ -164,8 +181,55 @@ def fetch_market_data() -> dict:
             if nikkei_sma25 > 0:
                 nikkei_vs_sma25_pct = round((nikkei_price - nikkei_sma25) / nikkei_sma25 * 100, 2)
                 nikkei_trend = "上昇" if nikkei_price >= nikkei_sma25 else "下落"
+        if len(nikkei_df) >= 20:
+            p_now = float(nikkei_df["Close"].iloc[-1])
+            p_20d = float(nikkei_df["Close"].iloc[-20])
+            nikkei_return_20d = round((p_now - p_20d) / p_20d * 100, 2) if p_20d > 0 else 0.0
     except Exception as e:
-        print(f"[data_fetcher] 日経SMA25取得失敗: {e}")
+        print(f"[data_fetcher] 日経SMA25/リターン取得失敗: {e}")
+
+    # VIX（恐怖指数）: 20未満=安定, 20-30=警戒, 30超=高恐怖
+    vix_level = 0.0
+    vix_trend = "不明"
+    try:
+        vix_df = fetch_ohlcv("^VIX", days=10)
+        if not vix_df.empty:
+            vix_level = round(float(vix_df["Close"].iloc[-1]), 1)
+            if len(vix_df) >= 5:
+                vix_5d = float(vix_df["Close"].iloc[-5])
+                vix_trend = "上昇" if vix_level > vix_5d * 1.02 else ("低下" if vix_level < vix_5d * 0.98 else "横ばい")
+    except Exception as e:
+        print(f"[data_fetcher] VIX取得失敗: {e}")
+
+    # 米10年国債利回り（上昇→円安→輸出株有利、低下→円高→輸出株逆風）
+    us10y_yield = 0.0
+    us10y_trend = "不明"
+    try:
+        tnx_df = fetch_ohlcv("^TNX", days=10)
+        if not tnx_df.empty:
+            us10y_yield = round(float(tnx_df["Close"].iloc[-1]), 3)
+            if len(tnx_df) >= 5:
+                tnx_5d = float(tnx_df["Close"].iloc[-5])
+                us10y_trend = "上昇" if us10y_yield > tnx_5d + 0.05 else ("低下" if us10y_yield < tnx_5d - 0.05 else "横ばい")
+    except Exception as e:
+        print(f"[data_fetcher] 米10年債取得失敗: {e}")
+
+    # Brent原油（エネルギー・化学株に直接影響）
+    oil_brent = 0.0
+    try:
+        oil_df = fetch_ohlcv("BZ=F", days=5)
+        if not oil_df.empty:
+            oil_brent = round(float(oil_df["Close"].iloc[-1]), 1)
+    except Exception as e:
+        print(f"[data_fetcher] Brent原油取得失敗: {e}")
+
+    # ダウ平均前日比（米国市場の流れ）
+    dow_change = 0.0
+    try:
+        dow_data = fetch_stock_data("^DJI")
+        dow_change = dow_data.get("change_pct", 0)
+    except Exception as e:
+        print(f"[data_fetcher] ダウ取得失敗: {e}")
 
     return {
         "nikkei": nikkei_data.get("price", 0),
@@ -174,6 +238,13 @@ def fetch_market_data() -> dict:
         "nikkei_sma25": nikkei_sma25,
         "nikkei_vs_sma25_pct": nikkei_vs_sma25_pct,
         "nikkei_trend": nikkei_trend,
+        "nikkei_return_20d": nikkei_return_20d,
+        "vix": vix_level,
+        "vix_trend": vix_trend,
+        "us10y_yield": us10y_yield,
+        "us10y_trend": us10y_trend,
+        "oil_brent": oil_brent,
+        "dow_change": dow_change,
     }
 
 
