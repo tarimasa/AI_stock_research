@@ -1,250 +1,287 @@
 """
 jquants_fetcher.py
-J-Quants API（日本取引所グループ公式・無料）を使って
-信用残・空売り比率・業種別データを取得するモジュール。
+J-Quants API V2（日本取引所グループ公式）から財務データを取得するモジュール。
 
-【セットアップ手順】
-1. https://jpx-jquants.com/ でアカウント登録（無料プランあり）
-2. メールアドレス・パスワードを取得
-3. 環境変数に設定:
-   JQUANTS_EMAIL=your@email.com
-   JQUANTS_PASSWORD=yourpassword
-4. pip install jquants-api-client
+【V2 API について（2025年12月22日以降登録者向け）】
+- 認証: API キーのみ（メール/パスワード不要）
+- API キーの取得: https://jpx-jquants.com/ → ダッシュボード → API キー発行
 
-【無料プランの制限】
-- 価格データ: 12週間遅延（リアルタイム不可）
-- 財務データ・信用残: 利用可能（遅延あり）
-- 短期売買目的なら Standard プラン（¥3,300/月）が必要
+【無料プラン（フリープラン）で取得できるデータ】
+  ✅ 上場銘柄一覧 (get_eq_master)        → 全上場銘柄のセクター・市場区分
+  ✅ 財務サマリー (get_fin_summary)       → 四半期ごとの売上・利益（遅延あり）
+  ✅ 日次株価データ (get_eq_bars_daily)   → 12週遅延（yfinanceで代替）
+  ❌ 信用残 weekly_margin_interest       → Standard プラン（¥3,300/月）のみ
+  ❌ 空売り比率 short_selling            → Standard プランのみ
 
-【本モジュールの動作】
-- 環境変数が設定されていれば実データを取得
-- 未設定の場合はダミーデータ（None/空）を返しスキップ
-- screener.py の score_stock() から将来的に呼び出す予定
+【環境変数】
+  JQUANTS_API_KEY = "<ダッシュボードで発行したAPIキー>"
+  GitHub Secrets に追加することで GitHub Actions でも利用可能。
+
+【非攻撃的アクセス方針】
+  - キャッシュ TTL: 銘柄一覧 24h、財務データ 7日
+  - API 呼び出し失敗時は None 返却でグレースフルフォールバック
+  - ライブラリのデフォルトレートリミットに従う
 """
 
 import os
-from datetime import date, timedelta
+import time
+from datetime import date, datetime, timedelta
+from functools import lru_cache
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
-JQUANTS_EMAIL = os.environ.get("JQUANTS_EMAIL", "")
-JQUANTS_PASSWORD = os.environ.get("JQUANTS_PASSWORD", "")
-_JQUANTS_AVAILABLE = bool(JQUANTS_EMAIL and JQUANTS_PASSWORD)
+JQUANTS_API_KEY = os.environ.get("JQUANTS_API_KEY", "")
 
 # jquants-api-client をオプション依存として扱う
 try:
     import jquantsapi
-    _JQUANTS_INSTALLED = True
+    _LIB_AVAILABLE = True
 except ImportError:
-    _JQUANTS_INSTALLED = False
+    _LIB_AVAILABLE = False
+
+# インメモリキャッシュ（プロセス内）
+_cache: dict = {}
+_CACHE_TTL_FINANCIAL = timedelta(days=7)
+_CACHE_TTL_LISTED = timedelta(hours=24)
 
 
 def is_available() -> bool:
-    """J-Quants APIが使える状態かどうかを返す。"""
-    return _JQUANTS_AVAILABLE and _JQUANTS_INSTALLED
+    """J-Quants V2 API が使える状態かどうかを返す。"""
+    return bool(JQUANTS_API_KEY) and _LIB_AVAILABLE
 
 
 def _get_client():
-    """認証済みクライアントを返す（内部使用）。"""
+    """V2 クライアントを返す（APIキー認証）。"""
     if not is_available():
         return None
     try:
-        client = jquantsapi.Client(mail_address=JQUANTS_EMAIL, password=JQUANTS_PASSWORD)
-        return client
+        return jquantsapi.ClientV2(api_key=JQUANTS_API_KEY)
     except Exception as e:
-        print(f"[jquants] クライアント初期化失敗: {e}")
+        print(f"[jquants] V2クライアント初期化失敗: {e}")
         return None
 
 
-def fetch_margin_balance(code: str) -> dict:
+def _is_cache_valid(key: str, ttl: timedelta) -> bool:
+    entry = _cache.get(key)
+    if not entry:
+        return False
+    return datetime.now() - entry["ts"] < ttl
+
+
+def _set_cache(key: str, value) -> None:
+    _cache[key] = {"ts": datetime.now(), "data": value}
+
+
+def _get_cache(key: str):
+    return _cache.get(key, {}).get("data")
+
+
+# ─────────────────────────────────────────────────────────────
+# 無料プラン: 財務サマリー（決算期ごとの売上・利益）
+# ─────────────────────────────────────────────────────────────
+
+def fetch_financial_growth(code: str) -> dict:
     """
-    信用残データを返す（週次・遅延データ）。
+    J-Quants 無料プランの財務サマリーから前年同期比成長率を計算して返す。
 
     戻り値:
     {
-        "code": "7203",
-        "margin_buy": 1234567,      # 信用買い残（株数）
-        "margin_sell": 234567,      # 信用売り残（株数）
-        "margin_ratio": 5.27,       # 信用倍率（買い残 / 売り残）
-        "date": "2025-03-28"        # データ日付
+        "revenue_growth_pct": 12.5,     # 売上高 YoY 成長率（%）
+        "profit_growth_pct": 23.1,      # 営業利益 YoY 成長率（%）
+        "latest_date": "2025-11-14",    # 直近の開示日
+        "available": True               # データ取得成功かどうか
     }
-    信用倍率が高い（>10）= 過熱・整理売りリスク
-    信用倍率が低い（<1）= 売り残多、踏み上げ（ショートスクイーズ）期待
-
-    J-Quanstなしの場合はすべてNoneを返す。
+    データ未取得時は全フィールドが None / available=False。
     """
-    if not is_available():
-        return {"code": code, "margin_buy": None, "margin_sell": None,
-                "margin_ratio": None, "date": None}
+    cache_key = f"fin_growth_{code}"
+    if _is_cache_valid(cache_key, _CACHE_TTL_FINANCIAL):
+        return _get_cache(cache_key)
+
+    empty = {"revenue_growth_pct": None, "profit_growth_pct": None,
+             "latest_date": None, "available": False}
 
     client = _get_client()
     if client is None:
-        return {"code": code, "margin_buy": None, "margin_sell": None,
-                "margin_ratio": None, "date": None}
+        return empty
 
+    code4 = code.replace(".T", "")
     try:
-        code4 = code.replace(".T", "")
-        # 直近4週分取得して最新値を使う
-        end = date.today()
-        start = end - timedelta(weeks=4)
-        df = client.get_weekly_margin_interest(
-            code=code4,
-            date_from=start.isoformat(),
-            date_to=end.isoformat(),
-        )
+        # V2 API: get_fin_summary で財務サマリーを取得
+        df = client.get_fin_summary(code=code4)
         if df is None or df.empty:
-            raise ValueError("空のデータ")
-        latest = df.sort_values("Date").iloc[-1]
-        buy = float(latest.get("MarginBuy", 0) or 0)
-        sell = float(latest.get("MarginSell", 0) or 0)
-        ratio = round(buy / sell, 2) if sell > 0 else None
-        return {
-            "code": code,
-            "margin_buy": int(buy),
-            "margin_sell": int(sell),
-            "margin_ratio": ratio,
-            "date": str(latest.get("Date", ""))[:10],
+            _set_cache(cache_key, empty)
+            return empty
+
+        # 開示日でソートして最新と1年前を比較
+        date_col = next((c for c in df.columns if "Date" in c or "date" in c), None)
+        if date_col:
+            df = df.sort_values(date_col)
+
+        if len(df) < 2:
+            _set_cache(cache_key, empty)
+            return empty
+
+        # 売上高カラムを探す（V2の列名はAPIバージョンで変わることがある）
+        sales_col = next((c for c in df.columns
+                          if any(k in c for k in ["NetSales", "Sales", "Revenue"])), None)
+        profit_col = next((c for c in df.columns
+                           if any(k in c for k in ["OperatingProfit", "OperatingIncome"])), None)
+
+        latest = df.iloc[-1]
+        # 4期前（約1年前）と比較
+        prev = df.iloc[-5] if len(df) >= 5 else df.iloc[0]
+
+        rev_growth = None
+        profit_growth = None
+
+        if sales_col:
+            latest_sales = float(latest[sales_col] or 0)
+            prev_sales = float(prev[sales_col] or 0)
+            if prev_sales > 0:
+                rev_growth = round((latest_sales - prev_sales) / prev_sales * 100, 1)
+
+        if profit_col:
+            latest_profit = float(latest[profit_col] or 0)
+            prev_profit = float(prev[profit_col] or 0)
+            if abs(prev_profit) > 0:
+                profit_growth = round((latest_profit - prev_profit) / abs(prev_profit) * 100, 1)
+
+        latest_date = str(latest.get(date_col, ""))[:10] if date_col else None
+        result = {
+            "revenue_growth_pct": rev_growth,
+            "profit_growth_pct": profit_growth,
+            "latest_date": latest_date,
+            "available": True,
         }
+        _set_cache(cache_key, result)
+        return result
+
     except Exception as e:
-        print(f"[jquants] {code} 信用残取得失敗: {e}")
-        return {"code": code, "margin_buy": None, "margin_sell": None,
-                "margin_ratio": None, "date": None}
+        print(f"[jquants] {code} 財務成長率取得失敗: {e}")
+        _set_cache(cache_key, empty)
+        return empty
 
 
-def fetch_short_selling_ratio(code: str) -> dict:
+def get_financial_growth_score(code: str) -> tuple[int, str]:
     """
-    空売り比率データを返す（日次・遅延データ）。
-
-    戻り値:
-    {
-        "code": "7203",
-        "short_ratio": 38.5,   # 空売り比率（%）
-        "date": "2025-03-28"
-    }
-    空売り比率が高い（>40%）= 売り方の多い状況、踏み上げリスクあり
-    空売り比率が低い（<20%）= 安定した買い優勢の相場
-
-    J-Quantsなしの場合はNoneを返す。
-    """
-    if not is_available():
-        return {"code": code, "short_ratio": None, "date": None}
-
-    client = _get_client()
-    if client is None:
-        return {"code": code, "short_ratio": None, "date": None}
-
-    try:
-        code4 = code.replace(".T", "")
-        end = date.today()
-        start = end - timedelta(weeks=2)
-        df = client.get_short_selling(
-            sector33code=None,  # 個別銘柄取得
-            date_from=start.isoformat(),
-            date_to=end.isoformat(),
-        )
-        if df is None or df.empty:
-            raise ValueError("空のデータ")
-        stock_df = df[df["Code"] == code4]
-        if stock_df.empty:
-            raise ValueError(f"{code4}のデータなし")
-        latest = stock_df.sort_values("Date").iloc[-1]
-        ratio = float(latest.get("ShortSellingRatio", 0) or 0)
-        return {
-            "code": code,
-            "short_ratio": round(ratio, 1),
-            "date": str(latest.get("Date", ""))[:10],
-        }
-    except Exception as e:
-        print(f"[jquants] {code} 空売り比率取得失敗: {e}")
-        return {"code": code, "short_ratio": None, "date": None}
-
-
-def fetch_foreign_investor_flows() -> dict:
-    """
-    外国人投資家の売買動向（週次）を返す。
-
-    戻り値:
-    {
-        "net_buy_stocks": 123456789,    # 現物株 外国人純買い（円）
-        "net_buy_futures": -987654321,  # 先物 外国人純買い（円）
-        "date": "2025-03-28"
-    }
-    外国人の現物・先物同時純買い → 強い上昇シグナル
-    同時純売り → 警戒（外国人売りが日本株を押し下げる傾向）
-
-    JPXサイトからの取得はJ-Quantsで代替可能。
-    未設定の場合はNoneを返す。
-    """
-    if not is_available():
-        return {"net_buy_stocks": None, "net_buy_futures": None, "date": None}
-
-    client = _get_client()
-    if client is None:
-        return {"net_buy_stocks": None, "net_buy_futures": None, "date": None}
-
-    try:
-        end = date.today()
-        start = end - timedelta(weeks=2)
-        df = client.get_breakdown(
-            date_from=start.isoformat(),
-            date_to=end.isoformat(),
-        )
-        if df is None or df.empty:
-            raise ValueError("空のデータ")
-        # 外国法人の純買いを集計
-        foreign = df[df["Section"] == "外国法人"]
-        if foreign.empty:
-            raise ValueError("外国法人データなし")
-        latest_date = foreign["Date"].max()
-        day_data = foreign[foreign["Date"] == latest_date]
-        net_stocks = int(day_data.get("NetBuyStocks", [0]).sum())
-        return {
-            "net_buy_stocks": net_stocks,
-            "net_buy_futures": None,  # 先物は別エンドポイントが必要
-            "date": str(latest_date)[:10],
-        }
-    except Exception as e:
-        print(f"[jquants] 外国人動向取得失敗: {e}")
-        return {"net_buy_stocks": None, "net_buy_futures": None, "date": None}
-
-
-def get_margin_signal_score(code: str) -> tuple[int, str]:
-    """
-    信用残データからスコアとシグナル文字列を返す（screener.pyから呼び出し用）。
+    財務成長率からスコアとシグナル説明を返す（screener から呼ぶ）。
 
     Returns:
         (score: int, description: str)
-        score 0〜20点
+        score: -5 〜 +20 点
+    短期売買目的でも、業績が急成長している銘柄は継続上昇しやすい。
+    業績急悪化は見送りシグナル。
     """
-    data = fetch_margin_balance(code)
-    ratio = data.get("margin_ratio")
-    if ratio is None:
+    if not is_available():
         return 0, ""
 
-    if ratio < 1.0:
-        # 信用倍率1未満: 空売り優勢 → 踏み上げ（ショートスクイーズ）期待
-        return 20, f"信用倍率{ratio}（売り残多・踏み上げ期待）"
-    elif ratio < 2.0:
-        return 12, f"信用倍率{ratio}（バランス型）"
-    elif ratio < 5.0:
-        return 5, f"信用倍率{ratio}（買い残やや多）"
+    data = fetch_financial_growth(code)
+    if not data.get("available"):
+        return 0, ""
+
+    profit_growth = data.get("profit_growth_pct")
+    rev_growth = data.get("revenue_growth_pct")
+
+    # 営業利益成長優先、なければ売上成長で代替
+    growth = profit_growth if profit_growth is not None else rev_growth
+    label = "営業利益" if profit_growth is not None else "売上高"
+
+    if growth is None:
+        return 0, ""
+
+    if growth >= 30:
+        return 20, f"{label}成長{growth:+.0f}%（急成長・モメンタム強い）"
+    elif growth >= 15:
+        return 12, f"{label}成長{growth:+.0f}%"
+    elif growth >= 5:
+        return 6, f"{label}成長{growth:+.0f}%（緩成長）"
+    elif growth >= -5:
+        return 2, f"{label}横ばい（{growth:+.0f}%）"
+    elif growth >= -20:
+        return 0, f"{label}減少{growth:.0f}%（注意）"
     else:
-        # 信用倍率5超: 買い残過多 → 整理売り圧力
-        return 0, f"信用倍率{ratio}（買い残過多・注意）"
+        return -5, f"{label}大幅減少{growth:.0f}%（要注意）"
 
 
-# ──────────────────────────────────────────────────────────────
-# 【将来の実装計画】
-# 1. screener.py の score_stock() に get_margin_signal_score() を組み込む
-#    → 信用倍率が低い（踏み上げ期待）銘柄をスコア加算
-#
-# 2. claude_analyzer.py の build_user_prompt() に外国人動向を追加
-#    → 「外国人純買い継続中」の文脈でClaudeが強気判断
-#
-# 3. GitHub Actions で JQUANTS_EMAIL / JQUANTS_PASSWORD を Secrets に追加
-#    → 自動レポートで信用残・空売り比率を毎日取得
-#
-# 4. J-Quants の Standard プラン（¥3,300/月）でリアルタイムデータを利用
-# ──────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# 無料プラン: 上場銘柄一覧（全銘柄スクリーニング拡張用）
+# ─────────────────────────────────────────────────────────────
+
+def fetch_all_listed_stocks(market_codes: list[str] | None = None) -> list[dict]:
+    """
+    J-Quants から東証の上場銘柄一覧を取得する。
+    market_codes: ["Prime", "Standard", "Growth"] で絞り込み可能。
+    未指定時は Prime のみ返す。
+
+    戻り値: [{"code": "7203.T", "name": "トヨタ自動車", "sector": "自動車"}, ...]
+    """
+    cache_key = "listed_stocks"
+    if _is_cache_valid(cache_key, _CACHE_TTL_LISTED):
+        cached = _get_cache(cache_key)
+        if cached:
+            return cached
+
+    if not is_available():
+        return []
+
+    client = _get_client()
+    if client is None:
+        return []
+
+    target_markets = market_codes or ["Prime"]
+
+    try:
+        df = client.get_eq_master()
+        if df is None or df.empty:
+            return []
+
+        # カラム名の正規化（V2はバージョンで変わることがある）
+        market_col = next((c for c in df.columns
+                           if "Market" in c and "Name" in c), None)
+        sector_col = next((c for c in df.columns
+                           if "Sector" in c and "Name" in c and "33" in c), None)
+        code_col = next((c for c in df.columns if c in ["Code", "code"]), None)
+        name_col = next((c for c in df.columns
+                         if c in ["CompanyName", "Name", "company_name"]), None)
+
+        if not code_col or not name_col:
+            print("[jquants] 上場銘柄一覧: 期待するカラムが見つかりません")
+            return []
+
+        # 市場区分でフィルタ
+        if market_col:
+            df = df[df[market_col].str.contains("|".join(target_markets), na=False)]
+
+        results = []
+        for _, row in df.iterrows():
+            code = str(row[code_col]).zfill(4)
+            if not code.isdigit():
+                continue
+            results.append({
+                "code": f"{code}.T",
+                "name": str(row[name_col]),
+                "sector": str(row[sector_col]) if sector_col else "不明",
+            })
+
+        print(f"[jquants] 上場銘柄一覧取得: {len(results)}銘柄")
+        _set_cache(cache_key, results)
+        return results
+
+    except Exception as e:
+        print(f"[jquants] 上場銘柄一覧取得失敗: {e}")
+        return []
+
+
+# ─────────────────────────────────────────────────────────────
+# 有料プラン（Standard）: 信用残・空売り（スキャフォール）
+# ─────────────────────────────────────────────────────────────
+
+def fetch_margin_balance(code: str) -> dict:
+    """
+    信用残データを返す（Standard プラン ¥3,300/月 が必要）。
+    フリープランでは常に available=False を返す。
+    """
+    return {"code": code, "margin_buy": None, "margin_sell": None,
+            "margin_ratio": None, "date": None, "available": False}

@@ -14,6 +14,7 @@ import pandas_ta as ta
 from dotenv import load_dotenv
 
 from data_fetcher import fetch_info, fetch_ohlcv
+import jquants_fetcher
 
 load_dotenv()
 
@@ -135,6 +136,28 @@ def score_stock(df: pd.DataFrame, info: dict, market_data: dict | None = None) -
     if sma75 and close < sma25 and close > sma75:
         score += 10
 
+    # ── 決算発表日接近スコア（-10〜+12点）──────────────────────────
+    # 決算前後のドリフト現象（Pre-Earnings Announcement Drift）:
+    #   好業績期待が高い銘柄では決算発表の1〜3週前から先行買いが入る傾向がある。
+    #   ただし直前（5日以内）はサプライズリスクでギャップが大きくなるため減点。
+    earnings_score = 0
+    days_to_earnings = None
+    earnings_ts = info.get("earningsTimestampStart") or info.get("earningsTimestamp")
+    if earnings_ts:
+        try:
+            earnings_date = datetime.fromtimestamp(int(earnings_ts)).date()
+            days_to_earnings = (earnings_date - date.today()).days
+            if 1 <= days_to_earnings <= 5:
+                earnings_score = -10   # 直前リスク: ギャップ大・ポジション取りにくい
+            elif 6 <= days_to_earnings <= 20:
+                earnings_score = 12    # 先行買いフェーズ: ドリフト恩恵
+            elif 21 <= days_to_earnings <= 45:
+                earnings_score = 5     # 早期ポジション: まだ上昇余地あり
+            # 0以下（決算後）や46日以上先はスコアなし
+            score += earnings_score
+        except Exception:
+            pass
+
     # ── 配当権利確定日接近スコア（最大25点）────────────────────────
     # 短期売買での活用理由:
     #   権利付最終日の1〜2週前は機関投資家・個人投資家の「配当取り買い」で
@@ -195,6 +218,7 @@ def score_stock(df: pd.DataFrame, info: dict, market_data: dict | None = None) -
         "div_yield_pct": round(div_yield_raw * 100, 2),  # 表示用のみ（スコア対象外）
         "ma25_diff_pct": round(ma25_diff_pct, 1),
         "rel_strength_vs_nikkei": rel_strength,  # 日経比20日相対強度（%）
+        "days_to_earnings": days_to_earnings,    # 決算発表まで（負=過去、Noneは不明）
     }
 
     return score, extra_signals
@@ -206,6 +230,12 @@ def _fetch_and_score(stock: dict, score_multiplier: float, market_data: dict | N
         df = fetch_ohlcv(stock["code"], days=252)
         info = fetch_info(stock["code"])
         s, extra = score_stock(df, info, market_data)
+
+        # J-Quants 財務成長スコアを追加（APIキー設定時のみ有効）
+        fin_score, fin_desc = jquants_fetcher.get_financial_growth_score(stock["code"])
+        s += fin_score
+        extra["financial_growth_desc"] = fin_desc  # Claudeへの説明文（空文字=データなし）
+
         s *= score_multiplier
         if s > 0:
             return {**stock, "score": round(s, 1), **extra}
@@ -290,5 +320,7 @@ def _dummy_screen(stocks: list) -> list:
                 "div_yield_pct": 2.5,
                 "ma25_diff_pct": -3.2,
                 "rel_strength_vs_nikkei": -6.8,
+                "days_to_earnings": 12,
+                "financial_growth_desc": "",
             })
     return result[:MAX_STOCKS]

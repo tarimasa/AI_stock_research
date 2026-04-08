@@ -41,6 +41,14 @@ SYSTEM_PROMPT = """
      ・11〜20日前: 機関投資家の仕込み本格化
      ・21〜35日前: 先行買い開始期
    - ma25_diff_pct（25日線乖離率）: -4%以下の調整は押し目買いチャンス
+   - days_to_earnings（決算発表まで日数）:
+     【重要・短期売買に直結】Pre-Earnings Announcement Drift（決算前ドリフト）:
+     好業績期待銘柄では決算発表の1〜3週前から先行買いが入る傾向がある。
+     ・6〜20日前: 先行買いフェーズ、ドリフト恩恵を受けやすい
+     ・21〜45日前: 早期ポジション、まだ余地あり
+     ・1〜5日前: ギャップリスク大、ポジション取りにくい → 見送りを検討
+     ・決算後: ギャップ消化中、方向感を確認してから判断
+   - financial_growth_desc（業績成長説明）: J-Quantsから取得。空欄はデータなし
    - rel_strength_vs_nikkei（日経比20日相対強度）:
      -15〜-5%: 日経より大幅アンダーパフォーム → 押し目、キャッチアップ期待
      -5〜0%: 小幅アンダーパフォーム → 軽い遅れ、好転余地あり
@@ -173,6 +181,17 @@ def build_user_prompt(screened_stocks: list, market_data: dict) -> str:
         rs = s.get("rel_strength_vs_nikkei")
         if rs is not None:
             sig_parts.append(f"日経比20日相対強度:{rs:+.1f}%")
+        days_earn = s.get("days_to_earnings")
+        if days_earn is not None:
+            if days_earn > 0:
+                sig_parts.append(f"決算発表まで:{days_earn}日")
+            elif days_earn == 0:
+                sig_parts.append("本日決算発表")
+            else:
+                sig_parts.append(f"決算後:{abs(days_earn)}日経過")
+        fin_desc = s.get("financial_growth_desc")
+        if fin_desc:
+            sig_parts.append(f"業績:{fin_desc}")
         signals_summary.append(f"  {s['code']} {s['name']}（{s.get('sector','')}）スコア{s.get('score',0)}: {', '.join(sig_parts)}")
 
     signals_text = "\n".join(signals_summary) if signals_summary else "  （追加シグナルなし）"
