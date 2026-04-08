@@ -76,8 +76,23 @@ SYSTEM_PROMPT = """
    - VIXトレンド「上昇中」: ボラティリティ拡大リスクあり → 利確目標を少し近くする
    - 米10年国債利回りトレンド「上昇」: 円安バイアス → 輸出株（自動車・電機）に有利
    - 米10年国債利回りトレンド「低下」: 円高リスク → 輸出株は慎重に
-   - Brent原油価格: エネルギー・化学セクターの推奨時に言及すること
+   - Brent原油価格・変化率:
+     ・-3%以上の急落: 地政学リスク低下（停戦・増産等）→ 航空(JAL/ANA)・海運・化学に追い風
+     ・+3%以上の急騰: 地政学リスク上昇 → エネルギー株に追い風、輸送コスト上昇で内需に逆風
+   - 金先物変化率:
+     ・金上昇（+1%超）: リスクオフフロー → 株式市場全体に慎重、特に輸出株逆風
+     ・金下落（-1%超）: リスクオン → 株式市場に追い風
+   - S&P500前日比がマイナス1%超: 米国株安が翌朝の日本株に波及、慎重に
    - ダウ平均前日比がマイナス大: 米国市場の売りが翌朝の日本市場に波及する可能性あり
+
+【ニュース解釈ルール】
+12. 提供される最新ニュースヘッドラインを読んで相場の文脈（地政学・マクロ）を把握すること：
+   - 中東停戦・和平合意: 原油下落 → 航空・化学・物流に強気、産油国関連に弱気
+   - 中東緊張・紛争拡大: 原油上昇 → エネルギー株に強気、輸送コスト上昇で内需逆風
+   - 米国利上げ示唆: 円安進行 → 輸出株（自動車・電機）に有利
+   - 米国景気後退懸念: リスクオフ → ディフェンシブ株（医薬・食品）を重視
+   - 中国経済減速: 資源・素材セクターに逆風
+   - ニュースの影響は「どのセクターが有利か」を必ずreason/risk_commentに反映すること
 
 【IFDOCO価格算出ルール】
 12. IFDOCO注文用に以下の3価格を必ず算出すること（10円単位で丸める）
@@ -119,7 +134,7 @@ JSON形式のみで出力すること（コードブロック不要）。
 """
 
 
-def build_user_prompt(screened_stocks: list, market_data: dict) -> str:
+def build_user_prompt(screened_stocks: list, market_data: dict, market_news: list | None = None) -> str:
     today = datetime.today().strftime("%Y-%m-%d")
     nikkei_trend = market_data.get("nikkei_trend", "不明")
     nikkei_vs_sma25 = market_data.get("nikkei_vs_sma25_pct", 0)
@@ -201,17 +216,50 @@ def build_user_prompt(screened_stocks: list, market_data: dict) -> str:
         macro_lines.append(f"- 恐怖指数(VIX): {vix_comment}")
     if us10y_comment:
         macro_lines.append(f"- 米国債金利: {us10y_comment}")
+    oil_change = market_data.get("oil_change", 0)
+    gold = market_data.get("gold", 0)
+    gold_change = market_data.get("gold_change", 0)
+    sp500_change = market_data.get("sp500_change", 0)
+
     if oil > 0:
-        macro_lines.append(f"- Brent原油: ${oil}（エネルギー・化学セクターに影響）")
+        oil_signal = ""
+        if oil_change <= -3:
+            oil_signal = " ⬇️ 急落（地政学リスク低下か）→ 航空・海運に追い風"
+        elif oil_change >= 3:
+            oil_signal = " ⬆️ 急騰（地政学リスク上昇か）→ エネルギー株に追い風"
+        macro_lines.append(f"- Brent原油: ${oil}（前日比{oil_change:+.1f}%{oil_signal}）")
+    if gold > 0:
+        gold_signal = ""
+        if gold_change >= 1:
+            gold_signal = " ⬆️ リスクオフ → 株式に慎重"
+        elif gold_change <= -1:
+            gold_signal = " ⬇️ リスクオン → 株式に追い風"
+        macro_lines.append(f"- 金先物: ${gold:.0f}（前日比{gold_change:+.1f}%{gold_signal}）")
+    if sp500_change != 0:
+        macro_lines.append(f"- S&P500前日比: {sp500_change:+.1f}%")
     if dow_change != 0:
         macro_lines.append(f"- ダウ平均前日比: {dow_change:+.1f}%")
     macro_text = "\n".join(macro_lines) if macro_lines else "- （マクロデータ取得なし）"
+
+    # 最新ニュースヘッドライン
+    news_text = "- （ニュース取得なし）"
+    if market_news:
+        news_lines = []
+        for n in market_news:
+            pub = n.get("published", "")[:16].replace("T", " ")
+            src = n.get("source", "")
+            title = n.get("title", "")
+            news_lines.append(f"  [{src}] {pub} {title}")
+        news_text = "\n".join(news_lines)
 
     return f"""
 ## 本日の市場状況
 - 日経平均: {market_data.get('nikkei', 'N/A')}円（前日比{market_data.get('nikkei_change', 'N/A')}%{trend_note}）
 - ドル円: {market_data.get('usdjpy', 'N/A')}円
 - 分析日: {today}{downtrend_warning}
+
+## 最新ニュースヘッドライン（地政学・マクロ文脈として活用すること）
+{news_text}
 
 ## クロスアセット・マクロ環境（推奨判断に反映すること）
 {macro_text}
@@ -225,17 +273,17 @@ def build_user_prompt(screened_stocks: list, market_data: dict) -> str:
 上記データをもとに、セクターが重複しないよう注意しながら、
 短期売買（数日〜2週間）の利益最大化を目的とした推奨レポートをJSON形式で生成してください。
 出来高急増・52週安値圏・権利確定日接近・日経比相対強度の複合シグナルを最重視してください。
-VIX・米金利・ドル円の方向性も必ずリスク評価に組み込んでください。
+VIX・米金利・原油・金・ドル円の方向性とニュースで読み取れる地政学的背景も必ずリスク評価に組み込んでください。
 """
 
 
-def analyze(screened_stocks: list, market_data: dict) -> dict:
+def analyze(screened_stocks: list, market_data: dict, market_news: list | None = None) -> dict:
     """Claude API で分析を実行し、推奨 dict を返す。"""
     if DRY_RUN:
         return _dummy_analysis(screened_stocks)
 
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    user_prompt = build_user_prompt(screened_stocks, market_data)
+    user_prompt = build_user_prompt(screened_stocks, market_data, market_news)
 
     for attempt in range(MAX_RETRIES):
         try:
