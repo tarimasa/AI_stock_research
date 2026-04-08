@@ -7,12 +7,14 @@ ThreadPoolExecutor による並列フェッチで 50〜100 銘柄を高速処理
 
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, datetime
 
 import pandas as pd
 import pandas_ta as ta
 from dotenv import load_dotenv
 
 from data_fetcher import fetch_info, fetch_ohlcv
+import jquants_fetcher
 
 load_dotenv()
 
@@ -23,11 +25,12 @@ DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 SCREENER_WORKERS = int(os.environ.get("SCREENER_WORKERS", 6))
 
 
-def score_stock(df: pd.DataFrame, info: dict) -> tuple[float, dict]:
+def score_stock(df: pd.DataFrame, info: dict, market_data: dict | None = None) -> tuple[float, dict]:
     """
     df: yfinance から取得した日足 OHLCV データ（直近 252 日分）
     info: yfinance ticker.info（PER, PBR, 配当利回り等）
-    Returns: (スコア 0〜175, 追加シグナル dict)
+    market_data: fetch_market_data() の結果（nikkei_return_20d, vix 等）
+    Returns: (スコア 0〜190, 追加シグナル dict)
     """
     if df.empty or len(df) < 26:
         return 0.0, {}
@@ -121,35 +124,118 @@ def score_stock(df: pd.DataFrame, info: dict) -> tuple[float, dict]:
         elif week52_pos < 0.50:
             score += 8
 
-    # 配当利回りボーナス（最大15点）: 高配当は値下がりリスク軽減
-    div_yield = info.get("dividendYield") or 0
-    if div_yield >= 0.04:
-        score += 15  # 4%以上
-    elif div_yield >= 0.03:
-        score += 10  # 3%以上
-    elif div_yield >= 0.02:
-        score += 5   # 2%以上
+    # 配当利回り: スコアには使わない（短期売買が目的のため保持前提スコアは除外）
+    # ただし表示用に正規化して保持する
+    # バグ修正: yfinanceが日本株で百分率(5.59)を返す場合があるため小数に正規化
+    div_yield_raw = info.get("dividendYield") or 0
+    if div_yield_raw > 1.0:
+        # 5.59% → 0.0559 に補正（百分率で返ってきた場合の防御）
+        div_yield_raw /= 100
 
     # 75日線との位置（10点）: 25日線は下 × 75日線は上 = 短期調整の押し目
     if sma75 and close < sma25 and close > sma75:
         score += 10
 
+    # ── 決算発表日接近スコア（-10〜+12点）──────────────────────────
+    # 決算前後のドリフト現象（Pre-Earnings Announcement Drift）:
+    #   好業績期待が高い銘柄では決算発表の1〜3週前から先行買いが入る傾向がある。
+    #   ただし直前（5日以内）はサプライズリスクでギャップが大きくなるため減点。
+    earnings_score = 0
+    days_to_earnings = None
+    earnings_ts = info.get("earningsTimestampStart") or info.get("earningsTimestamp")
+    if earnings_ts:
+        try:
+            earnings_date = datetime.fromtimestamp(int(earnings_ts)).date()
+            days_to_earnings = (earnings_date - date.today()).days
+            if 1 <= days_to_earnings <= 5:
+                earnings_score = -10   # 直前リスク: ギャップ大・ポジション取りにくい
+            elif 6 <= days_to_earnings <= 20:
+                earnings_score = 12    # 先行買いフェーズ: ドリフト恩恵
+            elif 21 <= days_to_earnings <= 45:
+                earnings_score = 5     # 早期ポジション: まだ上昇余地あり
+            # 0以下（決算後）や46日以上先はスコアなし
+            score += earnings_score
+        except Exception:
+            pass
+
+    # ── 配当権利確定日接近スコア（最大25点）────────────────────────
+    # 短期売買での活用理由:
+    #   権利付最終日の1〜2週前は機関投資家・個人投資家の「配当取り買い」で
+    #   統計的に有意な上昇バイアスが確認されている（Kato & Loewenstein 1995、
+    #   日本株の ex-day 前後の超過リターン研究）。
+    #   ※目的は配当受取ではなく、この「買い需要」を短期的に利用すること。
+    #   権利落ち後は買い圧力が消え価格調整が入るため、権利付最終日前後での売却を推奨。
+    # yfinance の exDividendDate は「権利落ち日」に相当（日本では権利付最終日の翌営業日）
+    days_to_ex = None
+    ex_div_score = 0
+    ex_date_ts = info.get("exDividendDate")
+    if ex_date_ts:
+        try:
+            if hasattr(ex_date_ts, "date"):
+                ex_date = ex_date_ts.date()
+            else:
+                ex_date = datetime.fromtimestamp(int(ex_date_ts)).date()
+            days_to_ex = (ex_date - date.today()).days
+            # 権利付最終日 = 権利落ち日の前営業日なので -1 で近似
+            days_to_last_buy = days_to_ex - 1
+            if 3 <= days_to_last_buy <= 10:
+                ex_div_score = 25   # 権利直前1〜2週: 買い需要ピーク
+            elif 11 <= days_to_last_buy <= 20:
+                ex_div_score = 18   # 2〜4週前: 機関の仕込み本格化
+            elif 21 <= days_to_last_buy <= 35:
+                ex_div_score = 10   # 1〜1.5ヶ月前: 先行買い開始
+            # 0以下（権利落ち後）や36日以上先はスコアなし
+            score += ex_div_score
+        except Exception:
+            pass
+
+    # ── 日経225比 相対強度スコア（最大15点）──────────────────────────
+    # 日経がx%下落した中で当該銘柄がより小さい下落 or 上昇 = 底堅さ → 反発期待
+    # 日経より大幅アンダーパフォーム（-5〜-15%）= 押し目・キャッチアップ余地
+    rel_strength = None
+    rel_strength_score = 0
+    nikkei_return_20d = (market_data or {}).get("nikkei_return_20d", 0)
+    if len(df) >= 20:
+        p_now = float(df["Close"].iloc[-1])
+        p_20d = float(df["Close"].iloc[-20])
+        stock_return_20d = (p_now - p_20d) / p_20d * 100 if p_20d > 0 else 0
+        rel_strength = round(stock_return_20d - nikkei_return_20d, 1)
+        # 小幅〜中幅アンダーパフォーム = 押し目でキャッチアップ期待
+        if -15 <= rel_strength <= -5:
+            rel_strength_score = 15
+        elif -5 < rel_strength < 0:
+            rel_strength_score = 8
+        elif 0 <= rel_strength <= 5:
+            rel_strength_score = 3
+        # rel_strength < -15: 何か問題がある可能性 → 加点なし
+        # rel_strength > 5: 既に先行している → 追いかけない
+        score += rel_strength_score
+
     extra_signals = {
         "vol_ratio": round(vol_ratio, 2),
         "week52_pos_pct": round(week52_pos * 100, 1),
-        "div_yield_pct": round(div_yield * 100, 2),
+        "days_to_ex_dividend": days_to_ex,       # 権利落ち日まで（負=過去、Noneは不明）
+        "div_yield_pct": round(div_yield_raw * 100, 2),  # 表示用のみ（スコア対象外）
         "ma25_diff_pct": round(ma25_diff_pct, 1),
+        "rel_strength_vs_nikkei": rel_strength,  # 日経比20日相対強度（%）
+        "days_to_earnings": days_to_earnings,    # 決算発表まで（負=過去、Noneは不明）
     }
 
     return score, extra_signals
 
 
-def _fetch_and_score(stock: dict, score_multiplier: float) -> dict | None:
+def _fetch_and_score(stock: dict, score_multiplier: float, market_data: dict | None = None) -> dict | None:
     """単一銘柄のデータ取得・スコアリング（ThreadPoolExecutor から呼ばれる）。"""
     try:
         df = fetch_ohlcv(stock["code"], days=252)
         info = fetch_info(stock["code"])
-        s, extra = score_stock(df, info)
+        s, extra = score_stock(df, info, market_data)
+
+        # J-Quants 財務成長スコアを追加（APIキー設定時のみ有効）
+        fin_score, fin_desc = jquants_fetcher.get_financial_growth_score(stock["code"])
+        s += fin_score
+        extra["financial_growth_desc"] = fin_desc  # Claudeへの説明文（空文字=データなし）
+
         s *= score_multiplier
         if s > 0:
             return {**stock, "score": round(s, 1), **extra}
@@ -200,7 +286,7 @@ def screen(stocks: list, market_data: dict | None = None) -> list:
     scored = []
     with ThreadPoolExecutor(max_workers=SCREENER_WORKERS) as executor:
         futures = {
-            executor.submit(_fetch_and_score, stock, score_multiplier): stock
+            executor.submit(_fetch_and_score, stock, score_multiplier, market_data): stock
             for stock in unique_stocks
         }
         for future in as_completed(futures):
@@ -230,7 +316,11 @@ def _dummy_screen(stocks: list) -> list:
                 "score": score,
                 "vol_ratio": 1.4,
                 "week52_pos_pct": 28.0,
+                "days_to_ex_dividend": 14,
                 "div_yield_pct": 2.5,
                 "ma25_diff_pct": -3.2,
+                "rel_strength_vs_nikkei": -6.8,
+                "days_to_earnings": 12,
+                "financial_growth_desc": "",
             })
     return result[:MAX_STOCKS]

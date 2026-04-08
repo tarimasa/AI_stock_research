@@ -36,5 +36,6 @@ jobs:
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
           LIFF_URL: ${{ secrets.LIFF_URL }}
+          JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
           DRY_RUN: 'false'
           MAX_STOCKS_TO_ANALYZE: '10'
