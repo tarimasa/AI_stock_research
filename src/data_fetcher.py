@@ -161,7 +161,11 @@ def fetch_market_data() -> dict:
             "vix_trend": "低下",
             "us10y_yield": 4.35,
             "us10y_trend": "上昇",
-            "oil_brent": 82.0,
+            "oil_brent": 75.0,
+            "oil_change": -3.2,
+            "gold": 2350.0,
+            "gold_change": 0.8,
+            "sp500_change": -0.4,
             "dow_change": 0.3,
         }
 
@@ -215,13 +219,34 @@ def fetch_market_data() -> dict:
         print(f"[data_fetcher] 米10年債取得失敗: {e}")
 
     # Brent原油（エネルギー・化学株に直接影響）
+    # 地政学リスク（中東紛争・停戦等）の影響を受けやすい
     oil_brent = 0.0
+    oil_change = 0.0
     try:
-        oil_df = fetch_ohlcv("BZ=F", days=5)
-        if not oil_df.empty:
-            oil_brent = round(float(oil_df["Close"].iloc[-1]), 1)
+        oil_data = fetch_stock_data("BZ=F")
+        oil_brent = oil_data.get("price", 0.0)
+        oil_change = oil_data.get("change_pct", 0.0)
     except Exception as e:
         print(f"[data_fetcher] Brent原油取得失敗: {e}")
+
+    # 金先物（安全資産フロー・地政学リスクの代理変数）
+    # 金上昇 = リスクオフ（株式には逆風）、金下落 = リスクオン（株式に追い風）
+    gold_price = 0.0
+    gold_change = 0.0
+    try:
+        gold_data = fetch_stock_data("GC=F")
+        gold_price = gold_data.get("price", 0.0)
+        gold_change = gold_data.get("change_pct", 0.0)
+    except Exception as e:
+        print(f"[data_fetcher] 金先物取得失敗: {e}")
+
+    # S&P500前日比（米国市場センチメント）
+    sp500_change = 0.0
+    try:
+        sp500_data = fetch_stock_data("^GSPC")
+        sp500_change = sp500_data.get("change_pct", 0.0)
+    except Exception as e:
+        print(f"[data_fetcher] S&P500取得失敗: {e}")
 
     # ダウ平均前日比（米国市場の流れ）
     dow_change = 0.0
@@ -244,6 +269,10 @@ def fetch_market_data() -> dict:
         "us10y_yield": us10y_yield,
         "us10y_trend": us10y_trend,
         "oil_brent": oil_brent,
+        "oil_change": oil_change,
+        "gold": gold_price,
+        "gold_change": gold_change,
+        "sp500_change": sp500_change,
         "dow_change": dow_change,
     }
 

@@ -65,9 +65,18 @@ def run_report() -> None:
         news = news_fetcher.fetch_news_for_stock(stock["code"], stock["name"])
         enriched_stocks.append({**stock, **stock_data, "news": news})
 
+    # Step 4.5: マーケット全体ニュース取得（地政学・マクロ）
+    print("[report] 市場ニュース取得中...")
+    market_news = []
+    try:
+        market_news = news_fetcher.fetch_market_news(hours=16, max_headlines=15)
+        print(f"[report] ニュース取得: {len(market_news)}件")
+    except Exception as e:
+        print(f"[report] ニュース取得失敗（続行）: {e}")
+
     # Step 5: Claude 分析
     print("[report] Claude による分析中...")
-    analysis = claude_analyzer.analyze(enriched_stocks, market_data)
+    analysis = claude_analyzer.analyze(enriched_stocks, market_data, market_news)
     print(f"[report] 市場状況: {analysis.get('market_condition')}")
     # Claudeの分析結果にもトレンド情報を付与（signal_trackerが参照）
     analysis["nikkei_trend"] = market_data.get("nikkei_trend", "")
