@@ -24,6 +24,7 @@ BLOB_NAME = "signals.json"
 _LOCAL_FALLBACK = Path(__file__).parent.parent / "config" / "signals_local.json"
 JST = ZoneInfo("Asia/Tokyo")
 EXPIRY_DAYS = 30
+SHORT_TERM_EXPIRY_DAYS = 5   # 短期シグナル（holding_days≤3）は5営業日で期限切れ
 
 
 def _use_blob() -> bool:
@@ -83,6 +84,7 @@ def record_signals(analysis: dict) -> int:
             continue
         if r.get("code") in existing_today:
             continue
+        holding_days = r.get("holding_days") or 10  # デフォルトは中期扱い
         new_signals.append({
             "signal_date": today,
             "code": r["code"],
@@ -93,6 +95,7 @@ def record_signals(analysis: dict) -> int:
             "stop_loss_price": r.get("stop_loss_price") or 0,
             "market_condition": analysis.get("market_condition", ""),
             "nikkei_trend": analysis.get("nikkei_trend", ""),
+            "holding_days": holding_days,
             "status": "open",
             "outcome_price": None,
             "outcome_date": None,
@@ -124,8 +127,13 @@ def update_signal_outcomes() -> list:
         if s["status"] != "open":
             continue
 
-        # 30日経過で期限切れ
-        if s["signal_date"] < expiry_cutoff:
+        # 期限切れ判定: 短期シグナル（holding_days≤3）は5日、それ以外は30日
+        is_short_term = s.get("holding_days", 10) <= 3
+        if is_short_term:
+            cutoff = (datetime.now(JST) - timedelta(days=SHORT_TERM_EXPIRY_DAYS)).strftime("%Y-%m-%d")
+        else:
+            cutoff = expiry_cutoff
+        if s["signal_date"] < cutoff:
             s["status"] = "expired"
             s["outcome_date"] = today
             closed.append(s)
@@ -163,7 +171,7 @@ def update_signal_outcomes() -> list:
 
 
 def get_win_rate_summary() -> dict:
-    """記録済みシグナル全体のバックテスト集計を返す。"""
+    """記録済みシグナル全体のバックテスト集計を返す。短期/中期別の勝率も算出する。"""
     signals = _load_signals()
 
     wins = [s for s in signals if s["status"] == "win"]
@@ -174,6 +182,20 @@ def get_win_rate_summary() -> dict:
     decided = len(wins) + len(losses)
     win_rate = round(len(wins) / decided * 100, 1) if decided > 0 else None
 
+    # 短期（holding_days≤3）と中期（holding_days>3）に分けて勝率を算出
+    def _category_stats(category_signals: list) -> dict:
+        w = [s for s in category_signals if s["status"] == "win"]
+        l = [s for s in category_signals if s["status"] == "loss"]
+        d = len(w) + len(l)
+        return {
+            "wins": len(w),
+            "losses": len(l),
+            "win_rate": round(len(w) / d * 100, 1) if d > 0 else None,
+        }
+
+    short_term = [s for s in signals if s.get("holding_days", 10) <= 3]
+    medium_term = [s for s in signals if s.get("holding_days", 1) > 3]
+
     return {
         "total": len(signals),
         "wins": len(wins),
@@ -181,4 +203,6 @@ def get_win_rate_summary() -> dict:
         "expired": len(expired),
         "open": len(open_sigs),
         "win_rate": win_rate,
+        "short_term": _category_stats(short_term),   # holding_days≤3
+        "medium_term": _category_stats(medium_term), # holding_days>3
     }

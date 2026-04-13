@@ -32,6 +32,11 @@ SYSTEM_PROMPT = """
 2. 必ず**異なるセクター**から選ぶこと（同セクターの銘柄を複数推奨しない）
 3. 以下の追加指標を積極的に活用し、テクニカルだけでなく多面的に判断すること：
    - vol_ratio（出来高比率）: 1.5倍以上は資金流入シグナル、安値圏での急増は特に強い
+   - directional_vol_score（方向性出来高）: 正値=上昇日の出来高増（買い集め）、負値=下落日の急増（売りシグナル）
+     ※ 10以上なら短期強気シグナル、-10以下なら短期シグナルとして採用を控えること
+   - rsi5（5日RSI）: 14日RSIより高感度。30以下なら直近急落後の短期反転期待大
+   - breakout_5d（5日高値ブレイクアウト）: trueの場合、直近レジスタンス突破中。短期モメンタム最重要シグナル
+   - candle_pattern（足型）: "bullish_engulfing"=陽線包み足（強気）、"hammer"=ハンマー足（底打ち兆候）
    - week52_pos_pct（52週レンジ位置）: 30%以下は年間安値圏で反発期待大
    - days_to_ex_dividend（権利落ち日まで日数）:
      【重要・短期売買に直結】権利付最終日（≒権利落ち日-1日）の1〜2週前は
@@ -55,6 +60,7 @@ SYSTEM_PROMPT = """
      0〜+5%: ほぼ同等 → 中立
      +5%超: 既に先行 → 追いかけすぎに注意
 4. スコアだけでなく**出来高急増×安値圏×権利確定日接近**の複合シグナルを最重視すること
+   また **breakout_5d×directional_vol_score正×rsi5低** の組み合わせは1〜3日の短期推奨として最優先すること
 5. 同じ銘柄（特にトヨタ・ソフトバンク・NTT・ソニー）を毎回選ばないこと。
    スコア上位でも前回と異なる視点・銘柄で提案を試みること。
 6. 配当利回り（div_yield_pct）はスコア対象外・参考情報のみ。
@@ -104,6 +110,28 @@ SYSTEM_PROMPT = """
      buy_price × (1 - stop_loss_pct/100) で算出。
      デフォルト stop_loss_pct=8。リスク★3なら10、★1なら5。VIX30超なら+2。
 
+【保有期間の分類と価格設定（重要）】
+13. 各推奨に必ず `holding_days`（推奨保有日数の目安）を設定すること。
+    短期（1〜3日）と中期（5〜10日）では目標・損切りの設定を変えること。
+
+   ◆ 短期シグナル（holding_days = 1〜3）: 以下の条件に当てはまる場合に適用
+      ・breakout_5d = true（5日高値ブレイクアウト検出）
+      ・rsi5 ≤ 30（短期RSI売られすぎ）かつ directional_vol_score > 0
+      ・candle_pattern = "bullish_engulfing" または "hammer" 検出時
+      → target_price: buy_price × 1.02〜1.04（2〜4%利益目標）
+      → stop_loss_price: buy_price × 0.97〜0.98（2〜3%損切り）
+      → exit_timing: 「目標到達 または 3営業日後 のいずれか早い方で決済」
+      ※ 3日で動かなければ迷わず撤退する。損小利大の原則を厳守すること。
+
+   ◆ 中期シグナル（holding_days = 5〜10）: 権利確定日接近・決算前ドリフト・RSI14売られすぎ
+      → 従来ルール（利益目標5〜8%、損切り8%）を適用
+      → exit_timing: 「目標到達 または 権利付最終日前日 または 決算発表2日前」
+
+   ◆ 判断のポイント:
+      - 短期シグナルは「今まさに動き始めた」証拠がある場合のみ適用
+      - 「割安だがいつ動くか不明」→ 中期に分類
+      - VIX30超の場合は短期シグナルでも holding_days を +1〜2 延ばすこと
+
 【出力フォーマット】
 JSON形式のみで出力すること（コードブロック不要）。
 {
@@ -124,7 +152,8 @@ JSON形式のみで出力すること（コードブロック不要）。
       "upside_pct": 8.8,
       "reason": "推奨理由（2〜3文、決め手となった指標を必ず言及）",
       "key_signal": "出来高1.8倍×52週安値圏25%×権利落ち12日前",
-      "exit_timing": "権利付最終日当日に売却推奨 / またはtarget_price到達時",
+      "holding_days": 3,
+      "exit_timing": "目標到達 または 3営業日後のいずれか早い方で決済",
       "risk_level": 2,
       "risk_comment": "リスクの内容"
     }
@@ -176,6 +205,19 @@ def build_user_prompt(screened_stocks: list, market_data: dict, market_news: lis
         vol = s.get("vol_ratio")
         if vol is not None:
             sig_parts.append(f"出来高比率:{vol}倍")
+        dv = s.get("directional_vol_score")
+        if dv is not None and dv != 0:
+            dv_label = "上昇日買い集め" if dv > 0 else "下落日売り浴びせ"
+            sig_parts.append(f"方向性出来高:{dv_label}({dv:+d}pt)")
+        rsi5_val = s.get("rsi5")
+        if rsi5_val is not None:
+            sig_parts.append(f"5日RSI:{rsi5_val}")
+        if s.get("breakout_5d"):
+            sig_parts.append("★5日高値ブレイク中")
+        cp = s.get("candle_pattern")
+        if cp and cp != "none":
+            pattern_jp = {"bullish_engulfing": "陽線包み足", "hammer": "ハンマー足"}.get(cp, cp)
+            sig_parts.append(f"足型:{pattern_jp}")
         pos = s.get("week52_pos_pct")
         if pos is not None:
             sig_parts.append(f"52週レンジ位置:{pos}%")
