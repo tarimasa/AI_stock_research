@@ -40,6 +40,7 @@ def score_stock(df: pd.DataFrame, info: dict, market_data: dict | None = None) -
     # テクニカル指標の計算（pandas_ta で統一）
     df = df.copy()
     df.ta.rsi(length=14, append=True)
+    df.ta.rsi(length=5, append=True)   # 短期RSI: 1〜3日反転シグナルに有効
     df.ta.macd(append=True)
     df.ta.bbands(length=20, append=True)
     df.ta.sma(length=25, append=True)
@@ -211,6 +212,84 @@ def score_stock(df: pd.DataFrame, info: dict, market_data: dict | None = None) -
         # rel_strength > 5: 既に先行している → 追いかけない
         score += rel_strength_score
 
+    # ── 短期売買特化シグナル（1〜3日の勝率向上） ──────────────────────────
+    # 既存スコアは「割安かつ反転余地あり」を示すが、「いつ反転するか」は示さない。
+    # 以下のシグナルは「今まさに動き始めているか」を捉える短期モメンタム系。
+
+    # 方向性出来高スコア（最大+20、最大-10）:
+    #   上昇日の出来高急増 = 機関の買い集め（Accumulation）→ 強気
+    #   下落日の出来高急増 = 売り浴びせ（Distribution） → 弱気でペナルティ
+    directional_vol_score = 0
+    if len(df) >= 2:
+        prev_close_dv = float(df["Close"].iloc[-2])
+        if close > prev_close_dv and vol_ratio >= 1.5:
+            directional_vol_score = 20   # 上昇日 + 出来高急増: 買い集めシグナル
+        elif close > prev_close_dv and vol_ratio >= 1.2:
+            directional_vol_score = 10   # 上昇日 + 出来高増加
+        elif close < prev_close_dv and vol_ratio >= 1.5:
+            directional_vol_score = -10  # 下落日の急増出来高: 分散売りシグナル
+    score += directional_vol_score
+
+    # 短期RSIスコア（最大30点）:
+    #   5日RSIは14日RSIより遥かに敏感で、1〜3日の反転タイミングに直結する。
+    #   RSI14=35（軽い売られすぎ）でも RSI5=15（超売られすぎ）なら直近の急落後の反発期待が高い。
+    rsi5 = float(latest.get("RSI_5", 50) or 50)
+    rsi5_score = 0
+    if rsi5 <= 20:
+        rsi5_score = 30   # 超売られすぎ: 強い短期反転シグナル
+    elif rsi5 <= 30:
+        rsi5_score = 20   # 売られすぎ: 反転期待大
+    elif rsi5 <= 40:
+        rsi5_score = 10   # 軽度売られすぎ
+    score += rsi5_score
+
+    # 5日高値ブレイクアウトスコア（最大30点）:
+    #   直近5日間の高値を出来高を伴って上抜けた = 短期レジスタンス突破。
+    #   「反発待ち」ではなく「モメンタムが始まった」ことを示す最も信頼性の高い短期シグナル。
+    breakout_score = 0
+    if len(df) >= 6:
+        high5d = df["High"].iloc[-6:-1].max()   # 昨日までの5日高値
+        if close > high5d and vol_ratio >= 1.3:
+            breakout_score = 30   # 高値ブレイク + 出来高増加: モメンタム確認
+        elif close > high5d:
+            breakout_score = 15   # 高値ブレイク（出来高なし）: 弱いが陽転シグナル
+    score += breakout_score
+
+    # 足型シグナルスコア（最大20点）:
+    #   前日の足型で翌日以降の短期反転を予測する先行シグナル。
+    #   陽線包み足（Bullish Engulfing）: 売り圧力を完全に上回った強気サイン。
+    #   ハンマー足（Hammer）: 下ひげが長く底打ち感を示す。
+    candle_score = 0
+    candle_pattern = "none"
+    if len(df) >= 2:
+        prev = df.iloc[-2]
+        prev_open = float(prev["Open"])
+        prev_close2 = float(prev["Close"])
+        prev_high = float(prev["High"])
+        prev_low = float(prev["Low"])
+        prev_body = abs(prev_close2 - prev_open)
+        if prev_body > 0:
+            prev_lower_wick = min(prev_close2, prev_open) - prev_low
+            prev_upper_wick = prev_high - max(prev_close2, prev_open)
+            # 陽線包み足: 前日陰線 × 当日終値が前日始値を超え × 当日始値が前日終値未満
+            is_bullish_engulfing = (
+                prev_close2 < prev_open and          # 前日陰線
+                close > prev_open and                 # 当日終値 > 前日始値
+                float(latest["Open"]) < prev_close2   # 当日始値 < 前日終値
+            )
+            # ハンマー足: 下ひげ ≥ 実体×2 かつ 上ひげ ≤ 実体×0.5
+            is_hammer = (
+                prev_lower_wick >= prev_body * 2 and
+                prev_upper_wick <= prev_body * 0.5
+            )
+            if is_bullish_engulfing:
+                candle_score = 20
+                candle_pattern = "bullish_engulfing"
+            elif is_hammer:
+                candle_score = 15
+                candle_pattern = "hammer"
+    score += candle_score
+
     extra_signals = {
         "vol_ratio": round(vol_ratio, 2),
         "week52_pos_pct": round(week52_pos * 100, 1),
@@ -219,6 +298,11 @@ def score_stock(df: pd.DataFrame, info: dict, market_data: dict | None = None) -
         "ma25_diff_pct": round(ma25_diff_pct, 1),
         "rel_strength_vs_nikkei": rel_strength,  # 日経比20日相対強度（%）
         "days_to_earnings": days_to_earnings,    # 決算発表まで（負=過去、Noneは不明）
+        # 短期売買特化シグナル（追加）
+        "directional_vol_score": directional_vol_score,   # 方向性出来高（正=買い/負=売り）
+        "rsi5": round(rsi5, 1),                           # 5日RSI（短期感応度）
+        "breakout_5d": breakout_score > 0,                # 5日高値ブレイクアウト
+        "candle_pattern": candle_pattern,                 # 足型シグナル
     }
 
     return score, extra_signals
@@ -322,5 +406,9 @@ def _dummy_screen(stocks: list) -> list:
                 "rel_strength_vs_nikkei": -6.8,
                 "days_to_earnings": 12,
                 "financial_growth_desc": "",
+                "directional_vol_score": 10,
+                "rsi5": 28.5,
+                "breakout_5d": False,
+                "candle_pattern": "none",
             })
     return result[:MAX_STOCKS]
