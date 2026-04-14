@@ -58,6 +58,22 @@ def build_report_text(analysis: dict, portfolio_result: dict) -> str:
     if analysis.get("caution"):
         lines.append(f"\n⚠️ {analysis['caution']}")
 
+    # エグジットアラート（Claude が検出した保有中銘柄の撤退シグナル）
+    exit_alerts = analysis.get("exit_alerts", [])
+    if exit_alerts:
+        lines.append("\n━━ エグジットアラート ━━")
+        for alert in exit_alerts:
+            code = alert.get("code", "").replace(".T", "")
+            name = alert.get("name", "")
+            alert_type = alert.get("alert_type", "")
+            message = alert.get("message", "")
+            suggested = alert.get("suggested_action", "")
+            lines.append(
+                f"🚨 【{alert_type}】{code} {name}\n"
+                f"   {message}\n"
+                f"   → {suggested}"
+            )
+
     # 保有株アラート（holdings がある場合のみ）
     if portfolio_result.get("holdings"):
         lines.append("\n━━ 保有株アラート ━━")

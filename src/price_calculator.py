@@ -115,17 +115,23 @@ def format_candidates_for_prompt(code: str, candidates: dict) -> str:
 
 def _tick_round(price: float) -> float:
     """
-    東証の呼値単位に丸める（簡易版）。
+    東証の呼値単位に丸める（簡易版）。切り捨て-0.5は切り上げ（round-half-up）。
     ・〜3,000円  : 1円単位
     ・3,001〜5,000円: 5円単位
     ・5,001〜30,000円: 10円単位
     ・30,001円〜 : 50円単位
     """
+    import math
+
+    def _rhu(x: float, unit: float) -> float:
+        """Round half up to the given unit."""
+        return math.floor(x / unit + 0.5) * unit
+
     if price <= 3000:
-        return round(price)
+        return _rhu(price, 1)
     elif price <= 5000:
-        return round(price / 5) * 5
+        return _rhu(price, 5)
     elif price <= 30000:
-        return round(price / 10) * 10
+        return _rhu(price, 10)
     else:
-        return round(price / 50) * 50
+        return _rhu(price, 50)

@@ -1,0 +1,41 @@
+name: Weekly Backtest Evaluation
+
+on:
+  schedule:
+    # 毎週月曜 09:00 JST (00:00 UTC) に評価レポートを送信
+    - cron: '0 0 * * 1'
+  workflow_dispatch:  # 手動実行も可能
+
+concurrency:
+  group: backtest-evaluation
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run evaluation report (console output)
+        run: python scripts/run_evaluation.py
+        env:
+          AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+          DRY_RUN: 'false'
+
+      - name: Send evaluation summary to LINE
+        run: python scripts/send_eval_summary.py
+        env:
+          AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          DRY_RUN: 'false'

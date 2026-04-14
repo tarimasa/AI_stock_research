@@ -303,6 +303,7 @@ def score_stock(df: pd.DataFrame, info: dict, market_data: dict | None = None) -
         "rsi5": round(rsi5, 1),                           # 5日RSI（短期感応度）
         "breakout_5d": breakout_score > 0,                # 5日高値ブレイクアウト
         "candle_pattern": candle_pattern,                 # 足型シグナル
+        "sma25": round(sma25, 1),                         # 25日移動平均（price_calculator が使用）
     }
 
     return score, extra_signals
@@ -410,5 +411,6 @@ def _dummy_screen(stocks: list) -> list:
                 "rsi5": 28.5,
                 "breakout_5d": False,
                 "candle_pattern": "none",
+                "sma25": 2820.0,
             })
     return result[:MAX_STOCKS]

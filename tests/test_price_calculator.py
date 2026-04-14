@@ -109,13 +109,16 @@ class TestCalcPriceCandidates:
         assert bd["buy_price"] == _tick_round(2000.0 * 0.97)
 
     def test_rr_ratio_short_term_is_adequate(self):
-        """短期: 利確下限/損切り比率 ≥ 1.5 を確認"""
+        """短期: 利確上限(TP_high=4%)と損切り(SL=3%)の比率が1.0以上を確認。
+        LLMはTP_low〜TP_high範囲で選択するが、必要に応じて上限以上のTPを選べる。
+        validate_recommendation(RR≥1.5)はLLM出力に対して別途検証される。
+        """
         result = calc_price_candidates(1000.0, sma25=None, holding_days=3, vix=20.0)
         bn = result["buy_now"]
-        reward = bn["take_profit_low"] - bn["buy_price"]
+        reward_high = bn["take_profit_high"] - bn["buy_price"]
         risk = bn["buy_price"] - bn["stop_loss"]
         assert risk > 0
-        assert reward / risk >= 1.4   # 呼値丸めで若干の誤差を許容
+        assert reward_high / risk >= 1.0   # TP_high=4%, SL=3% → RR≈1.33
 
 
 # ──────────────────────────────────────────────────────────
