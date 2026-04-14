@@ -12,11 +12,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import backtest_logger
 import claude_analyzer
 import data_fetcher
 import line_notifier
+import macro_preprocessor
 import news_fetcher
 import portfolio_tracker
+import price_calculator
 import screener
 import signal_tracker
 
@@ -44,6 +47,10 @@ def run_report() -> None:
         f"トレンド: {market_data.get('nikkei_trend')}"
     )
 
+    # Step 2.5: マクロ前処理（VIX・米株・金・原油・金利フラグを生成）
+    macro_result = macro_preprocessor.preprocess_macro(market_data)
+    print(f"[report] マクロ判定: {macro_result['condition']} / {macro_result['flags_text']}")
+
     # Step 3: スクリーニング（market_data を渡してトレンドフィルターを適用）
     print("[report] スクリーニング中...")
     screened = screener.screen(stocks, market_data)
@@ -56,6 +63,16 @@ def run_report() -> None:
             "text": "📊 本日はスクリーニング通過銘柄がありませんでした。",
         }])
         return
+
+    # Step 3.5: 各銘柄の候補価格を事前計算（LLMの計算ミス排除）
+    vix = macro_result.get("vix", 20.0)
+    for stock in screened:
+        current_price = stock.get("price") or stock.get("close") or stock.get("current_price") or 0
+        sma25 = stock.get("sma25")
+        if current_price > 0:
+            stock["price_candidates"] = price_calculator.calc_all_candidates(
+                current_price, sma25, vix=vix
+            )
 
     # Step 4: 各銘柄の詳細データ取得 & ニュース付与
     print("[report] 銘柄詳細データ & ニュース取得中...")
@@ -76,7 +93,7 @@ def run_report() -> None:
 
     # Step 5: Claude 分析
     print("[report] Claude による分析中...")
-    analysis = claude_analyzer.analyze(enriched_stocks, market_data, market_news)
+    analysis = claude_analyzer.analyze(enriched_stocks, market_data, market_news, macro_result)
     print(f"[report] 市場状況: {analysis.get('market_condition')}")
     # Claudeの分析結果にもトレンド情報を付与（signal_trackerが参照）
     analysis["nikkei_trend"] = market_data.get("nikkei_trend", "")
@@ -86,6 +103,9 @@ def run_report() -> None:
     try:
         closed = signal_tracker.update_signal_outcomes()
         signal_tracker.record_signals(analysis)
+        # バックテストログ: シグナル詳細を記録し、クローズ済み結果も反映
+        backtest_logger.log_recommendations(analysis, enriched_stocks, macro_result)
+        backtest_logger.update_outcomes(closed)
         summary = signal_tracker.get_win_rate_summary()
         win_rate_str = f"{summary['win_rate']}%" if summary["win_rate"] is not None else "集計中"
         print(
