@@ -4,10 +4,14 @@ on:
   push:
     branches:
       - main
+    paths:
+      - 'src/liff/**'
   pull_request:
     types: [opened, synchronize, reopened, closed]
     branches:
       - main
+    paths:
+      - 'src/liff/**'
   workflow_dispatch:
 
 jobs:
