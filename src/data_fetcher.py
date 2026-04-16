@@ -1,10 +1,12 @@
 """
 data_fetcher.py
 yfinance を使い銘柄の株価・テクニカル指標・ファンダメンタルズを取得する。
+J-Quants API V2 (Light プラン) による日本株 OHLCV 取得を追加。
 """
 
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 import yfinance as yf
@@ -293,3 +295,266 @@ def _dummy_stock_data(ticker: str) -> dict:
         "week52_high": 3200.0,
         "week52_low": 2100.0,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# J-Quants API V2 による日本株 OHLCV 取得
+# yfinance の fetch_ohlcv() を置き換える。
+# JQUANTS_API_KEY が未設定の場合は yfinance にフォールバックする。
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _jquants_code4(code: str) -> str:
+    """
+    銘柄コードを J-Quants の 4 桁形式に正規化する。
+    "7203.T" → "7203", "72030" → "7203"（末尾 0 を除去）
+    """
+    code = code.replace(".T", "").replace(".t", "").strip()
+    if len(code) == 5 and code.endswith("0") and code.isdigit():
+        code = code[:4]
+    return code[:4]
+
+
+def _get_jquants_client():
+    """jquantsapi.ClientV2 を返す。APIキー未設定時は None。"""
+    api_key = os.environ.get("JQUANTS_API_KEY", "")
+    if not api_key:
+        return None
+    try:
+        import jquantsapi
+        return jquantsapi.ClientV2(api_key=api_key)
+    except Exception as e:
+        print(f"[data_fetcher] J-Quants クライアント初期化失敗: {e}")
+        return None
+
+
+def fetch_daily_ohlcv(code: str, days: int = 60) -> pd.DataFrame:
+    """
+    J-Quants API で指定銘柄の日足 OHLCV を取得する。
+    yfinance の fetch_ohlcv() を置き換える（JQUANTS_API_KEY 未設定時はフォールバック）。
+
+    Args:
+        code: 銘柄コード（"7203", "7203.T", "72030" すべて受け付ける）
+        days: 取得日数（デフォルト 60 営業日分）
+
+    Returns:
+        DataFrame（index: Date, columns: Open High Low Close Volume AdjClose）
+    """
+    if DRY_RUN:
+        return pd.DataFrame()
+
+    client = _get_jquants_client()
+    if client is None:
+        # yfinance フォールバック
+        code_yf = f"{_jquants_code4(code)}.T" if "." not in code else code
+        return fetch_ohlcv(code_yf, days)
+
+    code4 = _jquants_code4(code)
+    end = datetime.today()
+    start = end - timedelta(days=int(days * 1.6) + 10)  # 余裕を持って取得
+
+    try:
+        df = client.get_eq_bars_daily(
+            code=code4,
+            from_yyyymmdd=start.strftime("%Y%m%d"),
+            to_yyyymmdd=end.strftime("%Y%m%d"),
+        )
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        df = _normalize_jquants_ohlcv(df)
+        return df.tail(days)
+
+    except Exception as e:
+        print(f"[data_fetcher] J-Quants OHLCV 取得失敗 ({code4}): {e}")
+        # yfinance フォールバック
+        code_yf = f"{code4}.T"
+        return fetch_ohlcv(code_yf, days)
+
+
+def fetch_bulk_daily(date: str | None = None) -> pd.DataFrame:
+    """
+    全上場銘柄の日足データを 1 回の API コールで一括取得する。
+    スクリーナーの入力データとして使う（Stage 1 全銘柄スキャン用）。
+
+    Args:
+        date: 取得日（"YYYY-MM-DD" 形式）。None なら直近営業日。
+
+    Returns:
+        全銘柄の OHLCV DataFrame（Code, Date, Open, High, Low, Close, Volume 列を含む）
+    """
+    if DRY_RUN:
+        return pd.DataFrame()
+
+    client = _get_jquants_client()
+    if client is None:
+        return pd.DataFrame()
+
+    date_str = ""
+    if date:
+        date_str = date.replace("-", "")
+
+    try:
+        df = client.get_eq_bars_daily(date_yyyymmdd=date_str)
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        return df
+
+    except Exception as e:
+        print(f"[data_fetcher] J-Quants bulk daily 取得失敗: {e}")
+        return pd.DataFrame()
+
+
+def load_bulk_history(code: str, days: int = 60) -> pd.DataFrame:
+    """
+    bulk CSV がダウンロード済みならそこから読み込み、なければ API から取得する。
+    _calc_technicals_bulk から呼ばれる。API コールを最小化し高速化。
+
+    Args:
+        code: 銘柄コード（"7203", "7203.T" 等）
+        days: 取得日数
+
+    Returns:
+        DataFrame（index: Date, columns: Open High Low Close Volume AdjClose）
+    """
+    code4 = _jquants_code4(code)
+    bulk_dir = Path(__file__).parent.parent / "data" / "bulk"
+
+    if bulk_dir.exists():
+        frames = []
+        for csv_file in sorted(bulk_dir.glob("daily_*.csv")):
+            try:
+                chunk = pd.read_csv(csv_file, dtype=str)
+                # Code 列が存在するか確認
+                code_col = next(
+                    (c for c in chunk.columns if c.lower() == "code"), None
+                )
+                if code_col is None:
+                    continue
+                filtered = chunk[chunk[code_col].str[:4] == code4]
+                if not filtered.empty:
+                    frames.append(filtered)
+            except Exception:
+                continue
+
+        if frames:
+            combined = pd.concat(frames, ignore_index=True)
+            date_col = next(
+                (c for c in combined.columns if "date" in c.lower()), None
+            )
+            if date_col:
+                combined[date_col] = pd.to_datetime(combined[date_col])
+                combined = (
+                    combined.sort_values(date_col)
+                    .drop_duplicates(date_col)
+                    .set_index(date_col)
+                )
+            for col in ["Open", "High", "Low", "Close", "Volume"]:
+                if col in combined.columns:
+                    combined[col] = pd.to_numeric(combined[col], errors="coerce")
+            return combined.tail(days)
+
+    # フォールバック: API 取得
+    return fetch_daily_ohlcv(code4, days)
+
+
+def fetch_master() -> pd.DataFrame:
+    """
+    上場銘柄マスタを返す（J-Quants API）。
+    Code, CompanyName, Sector33CodeName, Sector17CodeName, MarketCodeName 等を含む。
+    """
+    client = _get_jquants_client()
+    if client is None:
+        return pd.DataFrame()
+    try:
+        df = client.get_eq_master()
+        return df if df is not None else pd.DataFrame()
+    except Exception as e:
+        print(f"[data_fetcher] J-Quants master 取得失敗: {e}")
+        return pd.DataFrame()
+
+
+def fetch_earnings_calendar() -> pd.DataFrame:
+    """決算発表予定日を返す（J-Quants API）。"""
+    client = _get_jquants_client()
+    if client is None:
+        return pd.DataFrame()
+    try:
+        df = client.get_eq_earnings_cal()
+        return df if df is not None else pd.DataFrame()
+    except Exception as e:
+        print(f"[data_fetcher] J-Quants 決算カレンダー取得失敗: {e}")
+        return pd.DataFrame()
+
+
+def fetch_trading_calendar(from_yyyymmdd: str = "", to_yyyymmdd: str = "") -> pd.DataFrame:
+    """取引カレンダー（営業日・祝日）を返す（J-Quants API）。"""
+    client = _get_jquants_client()
+    if client is None:
+        return pd.DataFrame()
+    try:
+        df = client.get_mkt_calendar(
+            from_yyyymmdd=from_yyyymmdd, to_yyyymmdd=to_yyyymmdd
+        )
+        return df if df is not None else pd.DataFrame()
+    except Exception as e:
+        print(f"[data_fetcher] J-Quants 取引カレンダー取得失敗: {e}")
+        return pd.DataFrame()
+
+
+def fetch_investor_types(from_yyyymmdd: str = "", to_yyyymmdd: str = "") -> pd.DataFrame:
+    """投資部門別売買状況を返す（J-Quants API, Light プラン以上）。"""
+    client = _get_jquants_client()
+    if client is None:
+        return pd.DataFrame()
+    try:
+        df = client.get_eq_investor_types(
+            from_yyyymmdd=from_yyyymmdd, to_yyyymmdd=to_yyyymmdd
+        )
+        return df if df is not None else pd.DataFrame()
+    except Exception as e:
+        print(f"[data_fetcher] J-Quants 投資部門別取得失敗: {e}")
+        return pd.DataFrame()
+
+
+def _normalize_jquants_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    J-Quants の OHLCV DataFrame を yfinance 互換形式に正規化する。
+    - Date 列をインデックスに昇順ソート
+    - AdjustmentClose を Close として採用（yfinance のデフォルトと同様）
+    - AdjustmentOpen/High/Low/Volume も採用
+    """
+    # Date インデックス化
+    date_col = next((c for c in df.columns if "date" in c.lower()), None)
+    if date_col and date_col in df.columns:
+        df = df.copy()
+        df[date_col] = pd.to_datetime(df[date_col])
+        df = df.set_index(date_col).sort_index()
+        df.index.name = "Date"
+
+    # 権利調整済み価格を Close として採用（yfinance auto_adjust=True 相当）
+    adj_map = {
+        "AdjustmentOpen": "Open",
+        "AdjustmentHigh": "High",
+        "AdjustmentLow": "Low",
+        "AdjustmentClose": "Close",
+        "AdjustmentVolume": "Volume",
+    }
+    for src, dst in adj_map.items():
+        if src in df.columns:
+            df[dst] = df[src]
+
+    # AdjClose 列として元の調整済み終値を保持
+    if "AdjustmentClose" in df.columns and "AdjClose" not in df.columns:
+        df["AdjClose"] = df["AdjustmentClose"]
+
+    # 数値型変換
+    for col in ["Open", "High", "Low", "Close", "Volume", "AdjClose"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    return df

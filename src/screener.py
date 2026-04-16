@@ -8,13 +8,19 @@ ThreadPoolExecutor による並列フェッチで 50〜100 銘柄を高速処理
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
+from pathlib import Path
 
 import pandas as pd
 import pandas_ta as ta
 from dotenv import load_dotenv
 
-from data_fetcher import fetch_info, fetch_ohlcv
+# J-Quants データ取得（yfinance の fetch_ohlcv / fetch_info を置き換え）
+from data_fetcher import fetch_bulk_daily, load_bulk_history
 import jquants_fetcher
+
+# Layer 2: データ強化モジュール
+from earnings_signal import get_upcoming_earnings
+from master_manager import get_master
 
 load_dotenv()
 
@@ -309,15 +315,42 @@ def score_stock(df: pd.DataFrame, info: dict, market_data: dict | None = None) -
     return score, extra_signals
 
 
-def _fetch_and_score(stock: dict, score_multiplier: float, market_data: dict | None = None) -> dict | None:
-    """単一銘柄のデータ取得・スコアリング（ThreadPoolExecutor から呼ばれる）。"""
+def _fetch_and_score(
+    stock: dict,
+    score_multiplier: float,
+    market_data: dict | None = None,
+    upcoming_earnings: dict | None = None,
+) -> dict | None:
+    """
+    J-Quants OHLCV で単一銘柄をスコアリングする（ThreadPoolExecutor から呼ばれる）。
+    yfinance の fetch_ohlcv / fetch_info を load_bulk_history / earnings_signal に置き換え。
+    """
     try:
-        df = fetch_ohlcv(stock["code"], days=252)
-        info = fetch_info(stock["code"])
+        code_raw = stock["code"]  # "7203.T" 形式
+        code4 = code_raw.replace(".T", "").replace(".t", "").strip()[:4]
+
+        # J-Quants OHLCV（bulk CSV 優先、なければ API、さらに yfinance フォールバック）
+        df = load_bulk_history(code4, days=252)
+
+        # info 辞書の構築:
+        #   - 決算日: earnings_signal から取得（yfinance earningsTimestamp の代替）
+        #   - PER/PBR: J-Quants 日足データにはなし（スコアなしになる、最大 10 点の損失）
+        info: dict = {}
+        if upcoming_earnings:
+            earn_info = upcoming_earnings.get(code4)
+            if earn_info:
+                try:
+                    earn_date = datetime.strptime(
+                        earn_info["earnings_date"], "%Y-%m-%d"
+                    )
+                    info["earningsTimestamp"] = int(earn_date.timestamp())
+                except (ValueError, KeyError):
+                    pass
+
         s, extra = score_stock(df, info, market_data)
 
         # J-Quants 財務成長スコアを追加（APIキー設定時のみ有効）
-        fin_score, fin_desc = jquants_fetcher.get_financial_growth_score(stock["code"])
+        fin_score, fin_desc = jquants_fetcher.get_financial_growth_score(code_raw)
         s += fin_score
         extra["financial_growth_desc"] = fin_desc  # Claudeへの説明文（空文字=データなし）
 
@@ -331,7 +364,7 @@ def _fetch_and_score(stock: dict, score_multiplier: float, market_data: dict | N
 
 def screen(stocks: list, market_data: dict | None = None) -> list:
     """
-    watchlist の全銘柄を並列スコアリングし上位 MAX_STOCKS 件を返す。
+    ウォッチリスト銘柄を J-Quants OHLCV で並列スコアリングし上位 MAX_STOCKS 件を返す。
 
     処理時間の目安（SCREENER_WORKERS=6 の場合）:
       ~30銘柄  → 約 20〜40 秒
@@ -365,13 +398,23 @@ def screen(stocks: list, market_data: dict | None = None) -> list:
             seen_codes.add(s["code"])
             unique_stocks.append(s)
 
+    # 決算カレンダーを事前取得（全スレッドで共有する）
+    upcoming_earnings: dict = {}
+    try:
+        upcoming_earnings = get_upcoming_earnings(days_ahead=45)
+        print(f"[screener] 決算情報取得: {len(upcoming_earnings)}銘柄")
+    except Exception as e:
+        print(f"[screener] 決算情報取得失敗（続行）: {e}")
+
     print(f"[screener] {len(unique_stocks)}銘柄を並列スクリーニング開始 "
           f"(workers={SCREENER_WORKERS})")
 
     scored = []
     with ThreadPoolExecutor(max_workers=SCREENER_WORKERS) as executor:
         futures = {
-            executor.submit(_fetch_and_score, stock, score_multiplier, market_data): stock
+            executor.submit(
+                _fetch_and_score, stock, score_multiplier, market_data, upcoming_earnings
+            ): stock
             for stock in unique_stocks
         }
         for future in as_completed(futures):
@@ -414,3 +457,460 @@ def _dummy_screen(stocks: list) -> list:
                 "sma25": 2820.0,
             })
     return result[:MAX_STOCKS]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ヘルパー: テクニカル指標ユーティリティ（全銘柄スキャンで利用）
+# ─────────────────────────────────────────────────────────────────────────────
+
+def calc_breakout_5d(hist: pd.DataFrame) -> bool:
+    """直近5日高値（前日まで）を当日終値が上抜けたかどうかを返す。"""
+    if len(hist) < 6:
+        return False
+    high5d = hist["High"].iloc[-6:-1].max()
+    close = float(hist["Close"].iloc[-1])
+    return close > high5d
+
+
+def calc_directional_vol_score(hist: pd.DataFrame) -> float:
+    """
+    方向性出来高スコアを返す（-100〜+100 程度）。
+    直近5日間の上昇日出来高と下落日出来高の差を、5日平均出来高×5 で正規化。
+    正 = 買い越し傾向、負 = 売り越し傾向。
+    """
+    if len(hist) < 5:
+        return 0.0
+    last5 = hist.tail(5).copy()
+    changes = last5["Close"].diff()
+    up_vol = float(last5["Volume"][changes > 0].sum())
+    down_vol = float(last5["Volume"][changes < 0].sum())
+    avg_vol_5 = float(last5["Volume"].mean())
+    if avg_vol_5 == 0:
+        return 0.0
+    return (up_vol - down_vol) / (avg_vol_5 * 5) * 100
+
+
+def _find_code_column(df: pd.DataFrame) -> str:
+    """DataFrame のコード列名を検索して返す。"""
+    for col in ["Code", "code", "CODE"]:
+        if col in df.columns:
+            return col
+    return df.columns[0]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer 4 / Phase 3: 全銘柄スキャン（Stage 1 フィルタ）
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _exclude_non_targets(df: pd.DataFrame, master: dict) -> pd.DataFrame:
+    """
+    短期トレードに不適切な銘柄（ETF・低流動性・ボロ株等）を除外する。
+    ~3,900銘柄 → ~1,500〜2,500 銘柄に絞り込む。
+    """
+    ETF_REIT_MARKETS = {
+        "ETF・ETN",
+        "REIT・ベンチャーファンド・カントリーファンド・インフラファンド",
+    }
+    exclude_codes: set = set()
+    code_col = _find_code_column(df)
+
+    for _, row in df.iterrows():
+        raw_code = str(row.get(code_col, "")).strip()
+        code4 = raw_code[:4]
+        if not code4.isdigit():
+            exclude_codes.add(code4)
+            continue
+
+        info = master.get(code4, {})
+        market = info.get("market", "")
+        sector = info.get("sector33", "")
+        volume = float(row.get("Volume", 0) or 0)
+        close = float(row.get("Close", 0) or 0)
+
+        if market in ETF_REIT_MARKETS or "ETF" in sector or "REIT" in sector:
+            exclude_codes.add(code4)
+        elif volume < 50_000:
+            exclude_codes.add(code4)
+        elif close < 100 or close > 50_000:
+            exclude_codes.add(code4)
+        elif close * volume < 5_000_000:
+            exclude_codes.add(code4)
+
+    mask = ~df[code_col].astype(str).str[:4].isin(exclude_codes)
+    return df[mask].copy()
+
+
+def _load_all_bulk_history() -> pd.DataFrame | None:
+    """
+    data/bulk/ 以下の全 bulk CSV を読み込み、long-form DataFrame を返す。
+    ファイルが存在しない場合は None を返す。
+    """
+    bulk_dir = Path(__file__).parent.parent / "data" / "bulk"
+    if not bulk_dir.exists():
+        return None
+
+    frames = []
+    for csv_file in sorted(bulk_dir.glob("daily_*.csv")):
+        try:
+            chunk = pd.read_csv(csv_file, dtype={"Code": str})
+            frames.append(chunk)
+        except Exception as e:
+            print(f"[screener] bulk CSV 読み込みエラー {csv_file.name}: {e}")
+
+    if not frames:
+        return None
+
+    combined = pd.concat(frames, ignore_index=True)
+    date_col = next((c for c in combined.columns if "date" in c.lower()), None)
+    if date_col:
+        combined[date_col] = pd.to_datetime(combined[date_col])
+        if date_col != "Date":
+            combined = combined.rename(columns={date_col: "Date"})
+
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        if col in combined.columns:
+            combined[col] = pd.to_numeric(combined[col], errors="coerce")
+
+    return combined
+
+
+def _calc_technicals_vectorized(bulk_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    全銘柄のテクニカル指標を groupby + rolling で一括計算する（Layer 5 / 5-2 最適化）。
+    個別ループ比で約30倍高速。
+
+    Args:
+        bulk_df: long-form DataFrame (Code, Date, Open, High, Low, Close, Volume)
+
+    Returns:
+        銘柄別の最新テクニカル指標 DataFrame
+    """
+    df = bulk_df.sort_values(["Code", "Date"]).copy()
+
+    def _rsi_series(series: pd.Series, length: int) -> pd.Series:
+        delta = series.diff()
+        gain = delta.where(delta > 0, 0.0).rolling(length, min_periods=length).mean()
+        loss = (-delta.where(delta < 0, 0.0)).rolling(length, min_periods=length).mean()
+        rs = gain / loss.replace(0, float("nan"))
+        return 100.0 - (100.0 / (1.0 + rs))
+
+    grouped = df.groupby("Code", group_keys=False)
+
+    df["rsi5"] = grouped["Close"].transform(lambda x: _rsi_series(x, 5))
+    df["rsi14"] = grouped["Close"].transform(lambda x: _rsi_series(x, 14))
+    df["sma25"] = grouped["Close"].transform(
+        lambda x: x.rolling(25, min_periods=25).mean()
+    )
+    df["avg_vol_20"] = grouped["Volume"].transform(
+        lambda x: x.rolling(20, min_periods=5).mean()
+    )
+
+    # 5日高値ブレイク（前日までの5日間）
+    df["high_5d_prev"] = grouped["High"].transform(
+        lambda x: x.shift(1).rolling(5, min_periods=5).max()
+    )
+    df["breakout_5d"] = df["Close"] > df["high_5d_prev"]
+
+    # 52週ポジション
+    df["high_52w"] = grouped["High"].transform(
+        lambda x: x.rolling(252, min_periods=60).max()
+    )
+    df["low_52w"] = grouped["Low"].transform(
+        lambda x: x.rolling(252, min_periods=60).min()
+    )
+    w52_range = (df["high_52w"] - df["low_52w"]).replace(0, float("nan"))
+    df["w52_pos"] = ((df["Close"] - df["low_52w"]) / w52_range * 100).fillna(50.0)
+
+    # 方向性出来高スコア（5日）
+    df["change"] = grouped["Close"].transform(lambda x: x.diff())
+    df["up_vol"] = df["Volume"].where(df["change"] > 0, 0.0)
+    df["down_vol"] = df["Volume"].where(df["change"] < 0, 0.0)
+    df["up_vol_5"] = grouped["up_vol"].transform(
+        lambda x: x.rolling(5, min_periods=1).sum()
+    )
+    df["down_vol_5"] = grouped["down_vol"].transform(
+        lambda x: x.rolling(5, min_periods=1).sum()
+    )
+    avg_vol_5 = grouped["Volume"].transform(
+        lambda x: x.rolling(5, min_periods=1).mean()
+    )
+    denom = (avg_vol_5 * 5).replace(0, float("nan"))
+    df["dvs"] = ((df["up_vol_5"] - df["down_vol_5"]) / denom * 100).fillna(0.0)
+
+    # 出来高比率
+    df["vol_ratio"] = (
+        df["Volume"] / df["avg_vol_20"].replace(0, float("nan"))
+    ).fillna(1.0)
+
+    # 最新行のみ抽出
+    latest = df.groupby("Code").tail(1).copy()
+    keep = ["Code", "Close", "Volume", "rsi5", "rsi14", "sma25",
+            "breakout_5d", "dvs", "vol_ratio", "w52_pos"]
+    available = [c for c in keep if c in latest.columns]
+    result = latest[available].rename(columns={"Close": "close", "Volume": "volume"})
+    result = result.copy()
+    result["code"] = result["Code"].astype(str).str[:4]
+    return result
+
+
+def _calc_technicals_individual(
+    today_df: pd.DataFrame,
+    master: dict,
+    max_workers: int = 6,
+) -> list[dict]:
+    """
+    銘柄ごとに過去データを個別取得してテクニカル指標を計算する（フォールバック）。
+    bulk CSV が存在しない場合に使用。ThreadPool で並列処理。
+    """
+    code_col = _find_code_column(today_df)
+
+    pre_candidates = [
+        {
+            "code": str(row.get(code_col, ""))[:4],
+            "close": float(row.get("Close", 0) or 0),
+            "volume": float(row.get("Volume", 0) or 0),
+        }
+        for _, row in today_df.iterrows()
+        if str(row.get(code_col, ""))[:4].isdigit() and float(row.get("Close", 0) or 0) > 0
+    ]
+
+    def _calc_one(pc: dict) -> dict | None:
+        code4 = pc["code"]
+        try:
+            hist = load_bulk_history(code4, days=60)
+            if hist.empty or len(hist) < 20:
+                return None
+
+            rsi5_s = ta.rsi(hist["Close"], length=5)
+            rsi14_s = ta.rsi(hist["Close"], length=14)
+            sma25_s = ta.sma(hist["Close"], length=25)
+
+            rsi5 = float(rsi5_s.iloc[-1]) if rsi5_s is not None and len(rsi5_s) > 0 else 50.0
+            rsi14 = float(rsi14_s.iloc[-1]) if rsi14_s is not None and len(rsi14_s) > 0 else 50.0
+            sma25 = float(sma25_s.iloc[-1]) if sma25_s is not None and len(sma25_s) > 0 else pc["close"]
+
+            breakout = calc_breakout_5d(hist)
+            dvs = calc_directional_vol_score(hist)
+
+            avg_vol_20 = float(hist["Volume"].tail(20).mean()) if len(hist) >= 20 else pc["volume"]
+            vol_ratio = pc["volume"] / avg_vol_20 if avg_vol_20 > 0 else 1.0
+
+            high_52w = float(hist["High"].max())
+            low_52w = float(hist["Low"].min())
+            w52_range = high_52w - low_52w
+            w52_pos = (pc["close"] - low_52w) / w52_range * 100 if w52_range > 0 else 50.0
+
+            info_m = master.get(code4, {})
+            return {
+                "code": code4,
+                "name": info_m.get("name", ""),
+                "sector": info_m.get("sector33", ""),
+                "close": pc["close"],
+                "volume": pc["volume"],
+                "rsi5": round(rsi5, 1),
+                "rsi14": round(rsi14, 1),
+                "sma25": round(sma25, 1),
+                "breakout_5d": breakout,
+                "dvs": round(dvs, 1),
+                "vol_ratio": round(vol_ratio, 2),
+                "w52_pos": round(w52_pos, 1),
+            }
+        except Exception as e:
+            print(f"[screener] テクニカル計算エラー {code4}: {e}")
+            return None
+
+    results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_calc_one, pc): pc for pc in pre_candidates}
+        for future in as_completed(futures):
+            result = future.result()
+            if result is not None:
+                results.append(result)
+    return results
+
+
+def _calc_technicals_for_fullscan(
+    filtered_df: pd.DataFrame,
+    master: dict,
+) -> list[dict]:
+    """
+    ベクトル化（bulk CSV 優先）→ 個別取得（フォールバック）でテクニカルを計算する。
+    """
+    bulk_df = _load_all_bulk_history()
+
+    if bulk_df is not None and not bulk_df.empty:
+        print(f"[screener] ベクトル化テクニカル計算 ({len(bulk_df)}行)")
+        tech_df = _calc_technicals_vectorized(bulk_df)
+
+        code_col = _find_code_column(filtered_df)
+        today_codes = set(filtered_df[code_col].astype(str).str[:4].tolist())
+
+        results = []
+        for _, row in tech_df.iterrows():
+            code4 = str(row.get("code", ""))[:4]
+            if code4 not in today_codes:
+                continue
+            info_m = master.get(code4, {})
+            results.append({
+                "code": code4,
+                "name": info_m.get("name", ""),
+                "sector": info_m.get("sector33", ""),
+                "close": float(row.get("close", 0) or 0),
+                "volume": float(row.get("volume", 0) or 0),
+                "rsi5": round(float(row.get("rsi5", 50) or 50), 1),
+                "rsi14": round(float(row.get("rsi14", 50) or 50), 1),
+                "sma25": round(float(row.get("sma25", 0) or 0), 1),
+                "breakout_5d": bool(row.get("breakout_5d", False)),
+                "dvs": round(float(row.get("dvs", 0) or 0), 1),
+                "vol_ratio": round(float(row.get("vol_ratio", 1) or 1), 2),
+                "w52_pos": round(float(row.get("w52_pos", 50) or 50), 1),
+            })
+        return results
+    else:
+        print("[screener] bulk CSV なし。個別取得にフォールバック。")
+        return _calc_technicals_individual(filtered_df, master)
+
+
+def _apply_stage1_filters(stocks: list[dict]) -> list[dict]:
+    """
+    テクニカル条件でフィルタし stage1_score と stage1_signals を付与する。
+    スコア > 0 の銘柄のみ通過。
+    """
+    passed = []
+
+    for s in stocks:
+        score = 0.0
+        signals: list[str] = []
+
+        breakout = bool(s.get("breakout_5d", False))
+        dvs = float(s.get("dvs", 0) or 0)
+        rsi5 = float(s.get("rsi5", 50) or 50)
+        rsi14 = float(s.get("rsi14", 50) or 50)
+        vol_ratio = float(s.get("vol_ratio", 1) or 1)
+        w52_pos = float(s.get("w52_pos", 50) or 50)
+
+        # 短期シグナル（最重要）
+        if breakout and dvs > 0 and rsi5 <= 30:
+            score += 100
+            signals.append("breakout+dvs正+rsi5低")
+        elif breakout and dvs > 0:
+            score += 60
+            signals.append("breakout+dvs正")
+
+        # 出来高急増
+        if vol_ratio >= 2.0:
+            score += 40
+            signals.append(f"出来高{vol_ratio:.1f}倍")
+        elif vol_ratio >= 1.5:
+            score += 20
+            signals.append(f"出来高{vol_ratio:.1f}倍")
+
+        # 52週安値圏
+        if w52_pos <= 15:
+            score += 30
+            signals.append(f"52w安値圏{w52_pos:.0f}%")
+        elif w52_pos <= 25:
+            score += 15
+            signals.append(f"52w安値圏{w52_pos:.0f}%")
+
+        # RSI売られすぎ
+        if rsi14 <= 25:
+            score += 25
+            signals.append(f"RSI14={rsi14:.0f}")
+        elif rsi14 <= 30:
+            score += 10
+
+        # 弱気シグナルはペナルティ（事実上除外）
+        if dvs <= -10:
+            score -= 200
+            signals.append("dvs負(除外)")
+
+        if score <= 0:
+            continue
+
+        s_copy = s.copy()
+        s_copy["stage1_score"] = score
+        s_copy["stage1_signals"] = signals
+        passed.append(s_copy)
+
+    return passed
+
+
+def _apply_stage1_filters_relaxed(stocks: list[dict]) -> list[dict]:
+    """
+    通常フィルタで0件になった場合の緩和版フィルタ。最低5件を返す。
+    """
+    for s in stocks:
+        dvs = float(s.get("dvs", 0) or 0)
+        rsi14 = float(s.get("rsi14", 50) or 50)
+        vol_ratio = float(s.get("vol_ratio", 1) or 1)
+        w52_pos = float(s.get("w52_pos", 50) or 50)
+        score = 0.0
+        if dvs > 0:
+            score += 20
+        if rsi14 <= 40:
+            score += 15
+        if vol_ratio >= 1.2:
+            score += 10
+        if w52_pos <= 35:
+            score += 10
+        s["stage1_score"] = score
+        s["stage1_signals"] = ["緩和フィルタ"]
+    return sorted(stocks, key=lambda x: x["stage1_score"], reverse=True)[:5]
+
+
+def run_full_scan(target_date: str | None = None) -> list[dict]:
+    """
+    全上場銘柄をスキャンし Stage 1 フィルタを通過した候補を返す（Layer 4 / Phase 3）。
+
+    処理フロー:
+        1. 全銘柄当日 OHLCV 一括取得（1 API コール）
+        2. ETF・低流動性等を除外（~3,900 → ~2,000 銘柄）
+        3. テクニカル指標をベクトル化で一括計算（bulk CSV 使用時は ~2秒）
+        4. Stage 1 フィルタでスコアリング
+        5. 上位10件を返す（Stage 2 トークン制限対策: 20 → 10 件）
+
+    Returns:
+        list[dict]: 最大10件の候補銘柄（Stage 2 への入力）
+    """
+    if DRY_RUN:
+        return []
+
+    print("[screener] 全銘柄スキャン開始...")
+
+    # 1. 全銘柄当日データ一括取得（1 API コール）
+    today_df = fetch_bulk_daily(date=target_date)
+    if today_df is None or today_df.empty:
+        print("[screener] bulk daily 取得失敗。フルスキャンをスキップ。")
+        return []
+    print(f"[screener] 当日データ取得: {len(today_df)}銘柄")
+
+    # 2. 銘柄マスタ・決算カレンダーを取得
+    master = get_master()
+    upcoming_earnings = get_upcoming_earnings(days_ahead=45)
+    print(f"[screener] マスタ: {len(master)}銘柄、決算予定: {len(upcoming_earnings)}銘柄")
+
+    # 3. 対象外銘柄を除外
+    filtered_df = _exclude_non_targets(today_df, master)
+    print(f"[screener] 除外後: {len(filtered_df)}銘柄（{len(today_df) - len(filtered_df)}件除外）")
+
+    # 4. テクニカル指標計算（ベクトル化 or 個別取得）
+    scored = _calc_technicals_for_fullscan(filtered_df, master)
+    print(f"[screener] テクニカル計算完了: {len(scored)}銘柄")
+
+    if not scored:
+        return []
+
+    # 5. Stage 1 フィルタ適用
+    filtered = _apply_stage1_filters(scored)
+    print(f"[screener] Stage 1 通過: {len(filtered)}銘柄")
+
+    # フォールバック: 0件なら緩和フィルタ
+    if not filtered:
+        print("[screener] 候補0件。緩和フィルタを適用。")
+        filtered = _apply_stage1_filters_relaxed(scored)
+
+    # 6. スコア降順 → 上位10件（Stage 2 トークン制限対策）
+    result = sorted(filtered, key=lambda x: x["stage1_score"], reverse=True)[:10]
+    print(f"[screener] フルスキャン完了: {len(result)}銘柄を Stage 2 に渡す")
+    return result
