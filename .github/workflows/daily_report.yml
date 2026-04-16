@@ -24,9 +24,76 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'              # Layer 5 / 5-10: pip キャッシュで依存関係インストールを高速化
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      # ── J-Quants 認証設定 ───────────────────────────────────────────────────
+      # jquants-api-client（Python ライブラリ）は JQUANTS_API_KEY 環境変数を直接読む。
+      # CLI バイナリを使う場合のみ下記 credentials.json が必要。
+      - name: Configure J-Quants credentials (for CLI, if used)
+        run: |
+          mkdir -p ~/.config/jquants
+          printf '{"api_key":"%s"}\n' "$JQUANTS_API_KEY" > ~/.config/jquants/credentials.json
+        env:
+          JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
+
+      # ── bulk CSV ダウンロード (Phase 3 / Layer 5 最適化) ─────────────────────
+      # FULL_SCAN_ENABLED=true のときだけ実行。
+      # 全銘柄の過去3ヶ月分日足を事前ダウンロードしてベクトル化計算を高速化。
+      - name: Download bulk historical data (full scan mode only)
+        if: ${{ vars.FULL_SCAN_ENABLED == 'true' }}
+        run: |
+          python - <<'EOF'
+          import os, sys
+          sys.path.insert(0, "src")
+          os.environ.setdefault("JQUANTS_API_KEY", os.environ.get("JQUANTS_API_KEY", ""))
+
+          from datetime import datetime, timedelta
+          from pathlib import Path
+          import jquantsapi
+
+          api_key = os.environ.get("JQUANTS_API_KEY", "")
+          if not api_key:
+              print("JQUANTS_API_KEY が設定されていません。スキップ。")
+              sys.exit(0)
+
+          client = jquantsapi.ClientV2(api_key=api_key)
+          bulk_dir = Path("data/bulk")
+          bulk_dir.mkdir(parents=True, exist_ok=True)
+
+          # 直近3ヶ月分をダウンロード
+          today = datetime.today()
+          for delta_months in [2, 1, 0]:
+              # 月初日を算出
+              target = today.replace(day=1) - timedelta(days=delta_months * 30)
+              from_yyyymmdd = target.strftime("%Y%m01")
+              to_yyyymmdd = (target.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+              to_yyyymmdd = to_yyyymmdd.strftime("%Y%m%d")
+              month_str = target.strftime("%Y-%m")
+              csv_path = bulk_dir / f"daily_{month_str}.csv"
+
+              if csv_path.exists():
+                  print(f"{month_str}: キャッシュ済みスキップ")
+                  continue
+
+              print(f"{month_str}: ダウンロード中 ({from_yyyymmdd}〜{to_yyyymmdd})...")
+              try:
+                  df = client.get_eq_bars_daily_range(
+                      start_dt=from_yyyymmdd,
+                      end_dt=to_yyyymmdd,
+                  )
+                  if df is not None and not df.empty:
+                      df.to_csv(csv_path, index=False)
+                      print(f"  保存完了: {len(df)}行 → {csv_path}")
+                  else:
+                      print(f"  データなし")
+              except Exception as e:
+                  print(f"  エラー: {e}")
+          EOF
+        env:
+          JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
 
       - name: Run AI stock report
         run: python src/main.py
@@ -39,3 +106,7 @@ jobs:
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
           DRY_RUN: 'false'
           MAX_STOCKS_TO_ANALYZE: '10'
+          # フルスキャンモード: GitHub Variables で FULL_SCAN_ENABLED=true に設定して有効化
+          FULL_SCAN_ENABLED: ${{ vars.FULL_SCAN_ENABLED || 'false' }}
+          # 移行期間中の並行比較: SCAN_COMPARE=true で差分ログを出力
+          SCAN_COMPARE: ${{ vars.SCAN_COMPARE || 'false' }}

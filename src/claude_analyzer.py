@@ -8,6 +8,12 @@ v2 変更点:
 - 価格計算を price_calculator.py に移行。LLM は action/holding_days 判断のみ
 - validate_recommendation() でRR比 < 1.5 の推奨を除外
 - format_screener_for_prompt() でユーザープロンプトをCSV形式に圧縮
+
+J-Quants 統合による追加変更:
+- タイムアウトを 120 → 180 秒に延長（全銘柄スキャン対応）
+- analyze_with_claude_safe() でトークン数チェック後に自動候補削減
+- analyze_with_claude_cached() でプロンプトキャッシュ有効化（応答時間短縮）
+- Stage 2 入力候補を最大10件に制限（タイムアウト対策）
 """
 
 import json
@@ -24,6 +30,8 @@ load_dotenv()
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 MODEL = "claude-haiku-4-5-20251001"
 MAX_RETRIES = 3
+# タイムアウトを 180 秒に延長（全銘柄スキャン版はプロンプトが大きい）
+_TIMEOUT = httpx.Timeout(180.0, connect=10.0)
 
 # ── システムプロンプト（圧縮版 ≤800 トークン） ────────────────────────────
 SYSTEM_PROMPT = """\
@@ -209,6 +217,27 @@ def build_user_prompt(
 
 # ── analyze ───────────────────────────────────────────────────────────────
 
+def _parse_claude_response(message) -> dict:
+    """Claude API レスポンスをパースして dict を返す共通処理。"""
+    raw = message.content[0].text.strip()
+    # JSON ブロックを抽出（```json ... ``` の場合に対応）
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    result = json.loads(raw)
+
+    # RR比バリデーション
+    validated = [validate_recommendation(r) for r in result.get("recommendations", [])]
+    valid = [r for r in validated if not r.get("_invalid", False)]
+    if len(valid) < len(validated):
+        print(f"[claude_analyzer] RR比不足で {len(validated) - len(valid)} 件の推奨を除外")
+    result["recommendations"] = valid
+    if "exit_alerts" not in result:
+        result["exit_alerts"] = []
+    return result
+
+
 def analyze(
     screened_stocks: list,
     market_data: dict,
@@ -221,7 +250,7 @@ def analyze(
 
     client = anthropic.Anthropic(
         api_key=os.environ["ANTHROPIC_API_KEY"],
-        timeout=httpx.Timeout(120.0, connect=10.0),
+        timeout=_TIMEOUT,
     )
     user_prompt = build_user_prompt(screened_stocks, market_data, market_news, macro_result)
 
@@ -233,23 +262,213 @@ def analyze(
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_prompt}],
             )
-            raw = message.content[0].text.strip()
-            # JSON ブロックを抽出（```json ... ``` の場合に対応）
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            result = json.loads(raw)
+            return _parse_claude_response(message)
 
-            # RR比バリデーション（修正E）
-            validated = [validate_recommendation(r) for r in result.get("recommendations", [])]
-            valid = [r for r in validated if not r.get("_invalid", False)]
-            if len(valid) < len(validated):
-                print(f"[claude_analyzer] RR比不足で {len(validated) - len(valid)} 件の推奨を除外")
-            result["recommendations"] = valid
-            if "exit_alerts" not in result:
-                result["exit_alerts"] = []
-            return result
+        except Exception as e:
+            wait = 2 ** attempt
+            print(f"[claude_analyzer] 試行 {attempt + 1}/{MAX_RETRIES} 失敗: {e}。{wait}秒後にリトライ")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(wait)
+
+    raise RuntimeError("Claude API の呼び出しが全リトライで失敗しました")
+
+
+# ── analyze_with_claude_safe（4-3a: トークン計測付き安全版）────────────────
+
+# Stage 2 入力トークン上限（超えたら候補を自動削減）
+_MAX_INPUT_TOKENS = 3000
+_MIN_CANDIDATES = 5
+
+
+def _count_tokens(client: anthropic.Anthropic, system: str, user: str) -> int:
+    """入力トークン数を計測する。"""
+    try:
+        resp = client.messages.count_tokens(
+            model=MODEL,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
+        return resp.input_tokens
+    except Exception:
+        # count_tokens 失敗時は文字数の 1/4 で近似
+        return (len(system) + len(user)) // 4
+
+
+def _build_fullscan_prompt(
+    candidates: list[dict],
+    macro_result: dict,
+    master: dict,
+    upcoming_earnings: dict,
+) -> str:
+    """
+    全銘柄スキャン候補用のコンパクトプロンプトを生成する（4-3 対策3）。
+    record-delimiter 形式でトークン効率を最大化。
+    """
+    lines: list[str] = []
+
+    lines.append(
+        f"M:{macro_result.get('condition','不明')}|"
+        f"{macro_result.get('flags_text','なし')}|"
+        f"risk+{macro_result.get('risk_adjustment', 0)}"
+    )
+    lines.append("")
+    lines.append("#c|n|s|p|b|d|r5|r14|v|w|sm|e|sg")
+
+    for s in candidates:
+        code = s.get("code", "")
+        info_m = master.get(code, {})
+        name = info_m.get("name", s.get("name", ""))[:6]
+        sector = info_m.get("sector33", s.get("sector", ""))[:4]
+        earn = upcoming_earnings.get(code, {})
+        earn_str = str(earn.get("days_until", "-")) if earn else "-"
+        sig = "+".join(s.get("stage1_signals", []))[:20]
+        bo = "T" if s.get("breakout_5d") else "F"
+
+        lines.append(
+            f"{code}|{name}|{sector}|{s.get('close', 0)}"
+            f"|{bo}|{s.get('dvs', 0)}|{s.get('rsi5', 50)}|{s.get('rsi14', 50)}"
+            f"|{s.get('vol_ratio', 1)}|{s.get('w52_pos', 50)}|{int(s.get('sma25', 0))}"
+            f"|{earn_str}|{sig}"
+        )
+
+    lines.append("")
+    lines.append("#PRICE(code:now=buy/tpL-tpH/sl|dip=buy/tpL-tpH/sl)")
+    for s in candidates:
+        pc = s.get("price_candidates")
+        if not pc:
+            continue
+        bn = pc.get("buy_now", {})
+        bd = pc.get("buy_dip", {})
+        if not bn:
+            continue
+        lines.append(
+            f"{s['code']}:"
+            f"now={bn.get('buy_price')}/{bn.get('take_profit_low')}-{bn.get('take_profit_high')}/{bn.get('stop_loss')}|"
+            f"dip={bd.get('buy_price')}/{bd.get('take_profit_low')}-{bd.get('take_profit_high')}/{bd.get('stop_loss')}"
+        )
+
+    return "\n".join(lines)
+
+
+def analyze_with_claude_safe(
+    candidates: list[dict],
+    macro_result: dict,
+    master: dict,
+    upcoming_earnings: dict,
+) -> dict:
+    """
+    全銘柄スキャン版の Claude 分析（4-3a: トークン数チェック付き）。
+    入力トークンが上限を超えたら候補を自動削減してリトライする。
+
+    Args:
+        candidates: run_full_scan() が返した Stage 1 通過候補（最大10件）
+        macro_result: preprocess_macro() の結果
+        master: get_master() の結果
+        upcoming_earnings: get_upcoming_earnings() の結果
+
+    Returns:
+        Claude が選定した推奨 dict
+    """
+    if DRY_RUN:
+        return _dummy_analysis(candidates)
+
+    client = anthropic.Anthropic(
+        api_key=os.environ["ANTHROPIC_API_KEY"],
+        timeout=_TIMEOUT,
+    )
+
+    current_candidates = list(candidates[:10])
+
+    # トークン数が収まるまで候補を2件ずつ削減
+    while len(current_candidates) >= _MIN_CANDIDATES:
+        user = _build_fullscan_prompt(
+            current_candidates, macro_result, master, upcoming_earnings
+        )
+        tokens = _count_tokens(client, SYSTEM_PROMPT, user)
+        print(f"[claude_analyzer] candidates={len(current_candidates)}, input_tokens={tokens}")
+
+        if tokens <= _MAX_INPUT_TOKENS:
+            break
+        current_candidates = current_candidates[:-2]
+
+    if len(current_candidates) < _MIN_CANDIDATES:
+        current_candidates = list(candidates[:_MIN_CANDIDATES])
+        user = _build_fullscan_prompt(
+            current_candidates, macro_result, master, upcoming_earnings
+        )
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            message = client.messages.create(
+                model=MODEL,
+                max_tokens=4096,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user}],
+            )
+            return _parse_claude_response(message)
+
+        except anthropic.APITimeoutError:
+            wait = 2 ** attempt
+            print(f"[claude_analyzer] タイムアウト。候補を削減してリトライ ({wait}秒後)")
+            if attempt < MAX_RETRIES - 1:
+                # タイムアウト時は候補をさらに削減
+                if len(current_candidates) > _MIN_CANDIDATES:
+                    current_candidates = current_candidates[:-2]
+                    user = _build_fullscan_prompt(
+                        current_candidates, macro_result, master, upcoming_earnings
+                    )
+                time.sleep(wait)
+        except Exception as e:
+            wait = 2 ** attempt
+            print(f"[claude_analyzer] 試行 {attempt + 1}/{MAX_RETRIES} 失敗: {e}。{wait}秒後にリトライ")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(wait)
+
+    raise RuntimeError("Claude API の呼び出しが全リトライで失敗しました")
+
+
+def analyze_with_claude_cached(
+    candidates: list[dict],
+    macro_result: dict,
+    master: dict,
+    upcoming_earnings: dict,
+) -> dict:
+    """
+    プロンプトキャッシュを有効化した Claude 分析（Layer 5 / 5-3 最適化）。
+    システムプロンプトをキャッシュすることで、2回目以降の応答時間を短縮し
+    入力トークン課金を 90% 削減する。
+    """
+    if DRY_RUN:
+        return _dummy_analysis(candidates)
+
+    client = anthropic.Anthropic(
+        api_key=os.environ["ANTHROPIC_API_KEY"],
+        timeout=_TIMEOUT,
+    )
+
+    user = _build_fullscan_prompt(
+        candidates[:10], macro_result, master, upcoming_earnings
+    )
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            message = client.messages.create(
+                model=MODEL,
+                max_tokens=4096,
+                system=[
+                    {
+                        "type": "text",
+                        "text": SYSTEM_PROMPT,
+                        "cache_control": {"type": "ephemeral"},  # プロンプトキャッシュ
+                    }
+                ],
+                messages=[{"role": "user", "content": user}],
+            )
+            usage = message.usage
+            cache_read = getattr(usage, "cache_read_input_tokens", 0)
+            cache_create = getattr(usage, "cache_creation_input_tokens", 0)
+            print(f"[claude_analyzer] cache_read={cache_read}, cache_created={cache_create}")
+            return _parse_claude_response(message)
 
         except Exception as e:
             wait = 2 ** attempt
