@@ -130,26 +130,30 @@ def format_screener_for_prompt(stocks: list, macro_result: dict) -> str:
 
     # ヘッダー付きCSV（1行ヘッダー + 銘柄ごと1行）
     lines.append("## 候補銘柄データ")
-    lines.append("code|name|sector|close|bo5d|dvs|rsi5|rsi14|vol|w52|ptn|sma25|ex_div|earn")
+    lines.append("code|name|sector|close|bo5d|dvs|rsi5|rsi14|vol|w52|ptn|sma25|ex_div|earn|sig")
 
     for s in stocks:
         close = s.get("price") or s.get("close") or s.get("current_price") or 0
-        dvs = s.get("directional_vol_score", 0) or 0
+        # フルスキャン(dvs/w52_pos)とウォッチリスト(directional_vol_score/week52_pos_pct)の両フィールド名に対応
+        dvs = s.get("directional_vol_score") if s.get("directional_vol_score") is not None else (s.get("dvs") or 0)
         rsi5 = s.get("rsi5") or 0
         rsi14 = s.get("rsi_14") or s.get("rsi14") or 0
         vol = s.get("vol_ratio") or 0
-        w52 = s.get("week52_pos_pct") or 0
+        w52 = s.get("week52_pos_pct") if s.get("week52_pos_pct") is not None else (s.get("w52_pos") or 0)
         ptn = s.get("candle_pattern") or "none"
         sma25 = s.get("sma25") or 0
         bo5d = "T" if s.get("breakout_5d") else "F"
         ex_div = s.get("days_to_ex_dividend")
         earn = s.get("days_to_earnings")
+        # フルスキャン由来の stage1_signals をシグナル列に追加
+        sig = "|".join(s.get("stage1_signals", [])) or "-"
         lines.append(
             f"{s['code']}|{s['name']}|{s.get('sector', '')}|{close}"
             f"|{bo5d}|{dvs:.0f}|{rsi5:.0f}|{rsi14:.0f}"
             f"|{vol:.2f}|{w52:.0f}|{ptn}|{sma25:.0f}"
             f"|{ex_div if ex_div is not None else '-'}"
             f"|{earn if earn is not None else '-'}"
+            f"|{sig}"
         )
 
     lines.append("")

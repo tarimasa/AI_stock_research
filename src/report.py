@@ -67,8 +67,11 @@ def run_report() -> None:
     print(f"[report] マクロ判定: {macro_result['condition']} / {macro_result['flags_text']}")
 
     # Step 2: スクリーニング（モードによって切り替え）
+    scan_info = None
     if FULL_SCAN_ENABLED:
         screened = _run_fullscan_mode(market_data)
+        stage1_count = len(screened)
+        scan_info = f"J-Quants全銘柄スキャン → Stage1通過 {stage1_count}件"
     else:
         screened = _run_watchlist_mode(market_data)
 
@@ -162,7 +165,7 @@ def run_report() -> None:
 
     # Step 7: LINE 送信
     print("[report] LINE 送信中...")
-    line_notifier.send_daily_report(analysis, portfolio_result)
+    line_notifier.send_daily_report(analysis, portfolio_result, scan_info=scan_info)
     print("[report] 送信完了")
 
 
@@ -178,15 +181,29 @@ def _run_watchlist_mode(market_data: dict) -> list:
 
 
 def _run_fullscan_mode(market_data: dict) -> list:
-    """全銘柄スキャン方式でスクリーニングする（Layer 4 / Phase 3）。"""
+    """全銘柄スキャン方式でスクリーニングする（Layer 4 / Phase 3）。
+    データ取得失敗時はウォッチリストモードにフォールバックする。
+    """
     print("[report] スクリーニング中（全銘柄スキャン方式）...")
     candidates = screener.run_full_scan()
+
+    if not candidates:
+        print("[report] フルスキャン結果なし → ウォッチリストモードにフォールバック")
+        return _run_watchlist_mode(market_data)
+
     print(f"[report] Stage 1 通過: {len(candidates)} 銘柄")
 
-    # フルスキャン候補の price フィールドを close から補完
     for c in candidates:
+        # price フィールドを close から補完
         if "price" not in c and "close" in c:
             c["price"] = c["close"]
+        # フィールド名をウォッチリスト形式に統一（Claude プロンプト互換）
+        if "dvs" in c and "directional_vol_score" not in c:
+            c["directional_vol_score"] = c["dvs"]
+        if "w52_pos" in c and "week52_pos_pct" not in c:
+            c["week52_pos_pct"] = c["w52_pos"]
+        if "rsi14" in c and "rsi_14" not in c:
+            c["rsi_14"] = c["rsi14"]
 
     return candidates
 
