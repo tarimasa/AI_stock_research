@@ -166,6 +166,16 @@ def build_flex_message(report_text: str) -> dict:
                         "type": "button",
                         "action": {
                             "type": "uri",
+                            "label": "📊 バックテスト評価",
+                            "uri": LIFF_URL + "?mode=backtest",
+                        },
+                        "style": "secondary",
+                        "color": "#2E7D32",
+                    },
+                    {
+                        "type": "button",
+                        "action": {
+                            "type": "uri",
                             "label": "📝 銘柄を更新する",
                             "uri": LIFF_URL,
                         },
