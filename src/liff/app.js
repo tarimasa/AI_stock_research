@@ -497,8 +497,56 @@ async function handleRefreshMode() {
   }
 }
 
+// ─────────────────────────────────────────
+// バックテスト評価レポート（/backtest エンドポイント呼び出し）
+// ─────────────────────────────────────────
+
+async function handleBacktestMode() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("mode") !== "backtest") return;
+
+  document.getElementById("portfolioForm").style.display = "none";
+  const resultArea = document.getElementById("resultArea");
+  const resultMsg = document.getElementById("resultMsg");
+  resultMsg.textContent = "📊 バックテスト評価レポートを生成しています...";
+  resultMsg.className = "result-msg";
+  document.getElementById("continueBtn").style.display = "none";
+  document.getElementById("backBtn").style.display = "none";
+  resultArea.style.display = "block";
+
+  const accessToken = liff.getAccessToken();
+  if (!accessToken) {
+    resultMsg.textContent = "⚠️ LIFFアクセストークンが取得できません。再ログインしてください。";
+    document.getElementById("backBtn").style.display = "block";
+    return;
+  }
+
+  try {
+    const resp = await fetch(`${WEBHOOK_BASE_URL}/backtest`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${accessToken}`,
+      },
+    });
+    if (!resp.ok) {
+      const body = await resp.text();
+      throw new Error(`サーバーエラー (${resp.status}): ${body}`);
+    }
+    const data = await resp.json();
+    resultMsg.textContent = data.message || "✅ リクエストを送信しました。まもなくLINEにレポートが届きます。";
+    resultMsg.className = "result-msg success";
+    setTimeout(() => liff.closeWindow(), 5000);
+  } catch (err) {
+    resultMsg.textContent = `⚠️ 送信に失敗しました: ${err.message}`;
+    resultMsg.className = "result-msg error";
+    document.getElementById("backBtn").style.display = "block";
+  }
+}
+
 // 初期化
 (async () => {
   await initLiff();
   handleRefreshMode();
+  handleBacktestMode();
 })();

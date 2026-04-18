@@ -37,6 +37,9 @@ import data_fetcher
 import line_notifier
 import portfolio_store
 import report as report_module
+import backtest_evaluator
+import backtest_logger
+import signal_tracker as signal_tracker_module
 
 # レポート再生成の多重実行を防ぐロック
 _report_lock = threading.Lock()
@@ -631,6 +634,40 @@ async def refresh_endpoint(
 
     threading.Thread(target=_run, daemon=True).start()
     return {"status": "ok", "message": "🔄 AI株式リサーチを更新しています...\n完了後にLINEにレポートをお送りします（3〜5分程度）。"}
+
+
+# ─────────────────────────────────────────
+# LIFF からのバックテスト評価レポートエンドポイント
+# ─────────────────────────────────────────
+
+@app.post("/backtest")
+async def backtest_endpoint(
+    authorization: str | None = Header(default=None),
+):
+    """LIFF から呼び出してバックテスト評価レポートをオンデマンド生成・LINE送信する。"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authorization header required")
+    liff_token = authorization.removeprefix("Bearer ")
+    _verify_liff_token(liff_token)
+
+    import traceback
+
+    def _run():
+        try:
+            closed = signal_tracker_module.update_signal_outcomes()
+            backtest_logger.update_outcomes(closed)
+            report_text = backtest_evaluator.generate_evaluation_report()
+            line_notifier.push_message([{"type": "text", "text": report_text}])
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[backtest] レポート生成失敗:\n{tb}", flush=True)
+            try:
+                line_notifier.push_message([{"type": "text", "text": f"⚠️ バックテスト評価に失敗しました\n{e}"}])
+            except Exception as push_err:
+                print(f"[backtest] エラー通知のLINE送信も失敗: {push_err}", flush=True)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "ok", "message": "📊 バックテスト評価レポートを生成しています...\nまもなくLINEにお送りします。"}
 
 
 # ─────────────────────────────────────────
