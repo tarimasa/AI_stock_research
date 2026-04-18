@@ -81,10 +81,15 @@ def run_report() -> None:
 
     if not screened:
         print("[report] スクリーニング通過銘柄なし。")
-        line_notifier.push_message([{
-            "type": "text",
-            "text": "📊 本日はスクリーニング通過銘柄がありませんでした。",
-        }])
+        # Flex Message で送信してボタンを表示する
+        empty_analysis = {
+            "market_condition": macro_result.get("condition", "注意"),
+            "market_comment": "本日はスクリーニング通過銘柄がありませんでした。",
+            "recommendations": [],
+            "exit_alerts": [],
+            "caution": None,
+        }
+        line_notifier.send_daily_report(empty_analysis, {"holdings": []}, scan_info=scan_info)
         return
 
     # Step 3: 各銘柄の候補価格を事前計算（LLMの計算ミス排除）

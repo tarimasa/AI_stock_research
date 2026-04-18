@@ -2,8 +2,8 @@ name: Weekly Backtest Evaluation
 
 on:
   schedule:
-    # 毎週月曜 09:00 JST (00:00 UTC) に評価レポートを送信
-    - cron: '0 0 * * 1'
+    # 毎週土曜 09:00 JST (00:00 UTC) に評価レポートを送信
+    - cron: '0 0 * * 6'
   workflow_dispatch:  # 手動実行も可能
 
 concurrency:

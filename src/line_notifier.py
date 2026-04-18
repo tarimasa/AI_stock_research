@@ -44,6 +44,8 @@ def build_report_text(analysis: dict, portfolio_result: dict) -> str:
         lines.append(f"理由: {analysis.get('market_comment', '')}")
     else:
         lines.append("━━ 本日の推奨銘柄（短期1〜3日）━━")
+        if not analysis.get("recommendations"):
+            lines.append(f"📊 {analysis.get('market_comment', '本日は推奨銘柄がありませんでした。')}")
         for r in analysis.get("recommendations", []):
             emoji = ACTION_EMOJI.get(r.get("action", ""), "⚪")
             risk_star = RISK_STARS.get(r.get("risk_level", 2), "★★☆")
