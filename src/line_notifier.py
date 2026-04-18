@@ -26,6 +26,15 @@ ACTION_EMOJI = {"今すぐ買う": "🟢", "押し目待ち": "🟡", "見送り
 RISK_STARS = {1: "★☆☆", 2: "★★☆", 3: "★★★"}
 
 
+def _format_stage1_signals(rec: dict) -> str:
+    """stage1_signals / key_signal から J-Quants スキャン根拠を1行で返す。"""
+    sigs = rec.get("stage1_signals") or []
+    if sigs:
+        return "📡 " + " / ".join(sigs)
+    key = rec.get("key_signal", "")
+    return f"📡 {key}" if key else ""
+
+
 def build_report_text(analysis: dict, portfolio_result: dict) -> str:
     """推奨レポート＋保有株アラートのテキストを生成。"""
     lines = []
@@ -34,26 +43,35 @@ def build_report_text(analysis: dict, portfolio_result: dict) -> str:
         lines.append("⛔ 本日は全銘柄買い見送り推奨")
         lines.append(f"理由: {analysis.get('market_comment', '')}")
     else:
-        lines.append("━━ 本日の推奨銘柄 ━━")
+        lines.append("━━ 本日の推奨銘柄（短期1〜3日）━━")
         for r in analysis.get("recommendations", []):
             emoji = ACTION_EMOJI.get(r.get("action", ""), "⚪")
             risk_star = RISK_STARS.get(r.get("risk_level", 2), "★★☆")
-            buy_p   = r.get("buy_price") or r.get("current_price") or 0
-            tp_p    = r.get("take_profit_price") or r.get("target_price") or 0
-            sl_p    = r.get("stop_loss_price") or 0
-            upside  = r.get("upside_pct") or 0
+            buy_p     = r.get("buy_price") or r.get("current_price") or 0
+            tp_p      = r.get("take_profit_price") or r.get("target_price") or 0
+            sl_p      = r.get("stop_loss_price") or 0
+            upside    = r.get("upside_pct") or 0
             current_p = r.get("current_price") or 0
-            lines.append(
+            hold_days = r.get("holding_days", 3)
+            sig_line  = _format_stage1_signals(r)
+
+            block = (
                 f"{emoji} {r.get('action', '')}  "
                 f"{r.get('code', '').replace('.T', '')} {r.get('name', '')}\n"
                 f"   現在値 ¥{current_p:,} → 目標 ¥{tp_p:,}（+{upside}%）\n"
                 f"   {r.get('reason', '')}\n"
-                f"   リスク: {risk_star} {r.get('risk_comment', '')}\n"
-                f"   ┌─ IFDOCO注文（SBI証券）\n"
-                f"   │①買い指値   ¥{buy_p:,}\n"
-                f"   │②利確売り   ¥{tp_p:,}（指値）\n"
-                f"   └③損切り売り ¥{sl_p:,}（逆指値）"
             )
+            if sig_line:
+                block += f"   {sig_line}\n"
+            block += (
+                f"   保有目安: {hold_days}営業日  "
+                f"リスク: {risk_star} {r.get('risk_comment', '')}\n"
+                f"   ┌─ IFDOCO注文\n"
+                f"   │①買い指値   ¥{buy_p:,}\n"
+                f"   │②利確指値   ¥{tp_p:,}\n"
+                f"   └③損切逆指値 ¥{sl_p:,}"
+            )
+            lines.append(block)
 
     if analysis.get("caution"):
         lines.append(f"\n⚠️ {analysis['caution']}")
@@ -186,9 +204,17 @@ def reply_message(reply_token: str, messages: list) -> None:
     resp.raise_for_status()
 
 
-def send_daily_report(analysis: dict, portfolio_result: dict) -> None:
-    """毎日の推奨レポートを LINE に送信する。"""
+def send_daily_report(
+    analysis: dict,
+    portfolio_result: dict,
+    scan_info: str | None = None,
+) -> None:
+    """毎日の推奨レポートを LINE に送信する。
+    scan_info: フッターに追加するスキャン情報（例: "J-Quants全銘柄スキャン: 3,921銘柄→Stage1通過8件"）
+    """
     report_text = build_report_text(analysis, portfolio_result)
+    if scan_info:
+        report_text += f"\n\n🔍 {scan_info}"
     if DRY_RUN:
         print("===== DRY RUN: 送信するレポート =====")
         print(report_text)

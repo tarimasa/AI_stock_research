@@ -377,7 +377,7 @@ def fetch_bulk_daily(date: str | None = None) -> pd.DataFrame:
     スクリーナーの入力データとして使う（Stage 1 全銘柄スキャン用）。
 
     Args:
-        date: 取得日（"YYYY-MM-DD" 形式）。None なら直近営業日。
+        date: 取得日（"YYYY-MM-DD" 形式）。None なら直近営業日（最大4日遡及）。
 
     Returns:
         全銘柄の OHLCV DataFrame（Code, Date, Open, High, Low, Close, Volume 列を含む）
@@ -389,24 +389,38 @@ def fetch_bulk_daily(date: str | None = None) -> pd.DataFrame:
     if client is None:
         return pd.DataFrame()
 
-    date_str = ""
+    # 試行する日付リストを構築
     if date:
-        date_str = date.replace("-", "")
+        date_candidates = [date.replace("-", "")]
+    else:
+        # 休日・データ未更新に対応するため直近4営業日を試す
+        from datetime import date as date_cls
+        date_candidates = []
+        d = date_cls.today()
+        while len(date_candidates) < 4:
+            if d.weekday() < 5:  # 月〜金のみ
+                date_candidates.append(d.strftime("%Y%m%d"))
+            d -= timedelta(days=1)
 
-    try:
-        df = client.get_eq_bars_daily(date_yyyymmdd=date_str)
-        if df is None or df.empty:
-            return pd.DataFrame()
+    for date_str in date_candidates:
+        try:
+            df = client.get_eq_bars_daily(date_yyyymmdd=date_str)
+            if df is None or df.empty:
+                print(f"[data_fetcher] {date_str}: データなし、前日を試みます")
+                continue
 
-        for col in ["Open", "High", "Low", "Close", "Volume"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
+            for col in ["Open", "High", "Low", "Close", "Volume"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        return df
+            print(f"[data_fetcher] bulk daily 取得: {date_str} ({len(df)}銘柄)")
+            return df
 
-    except Exception as e:
-        print(f"[data_fetcher] J-Quants bulk daily 取得失敗: {e}")
-        return pd.DataFrame()
+        except Exception as e:
+            print(f"[data_fetcher] {date_str} bulk daily 取得失敗: {e}")
+
+    print("[data_fetcher] J-Quants bulk daily: 直近4日分のデータ取得に失敗")
+    return pd.DataFrame()
 
 
 def load_bulk_history(code: str, days: int = 60) -> pd.DataFrame:
