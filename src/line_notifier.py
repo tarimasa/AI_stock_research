@@ -169,7 +169,7 @@ def build_flex_message(report_text: str) -> dict:
                             "label": "📊 バックテスト評価",
                             "uri": LIFF_URL + "?mode=backtest",
                         },
-                        "style": "secondary",
+                        "style": "primary",
                         "color": "#2E7D32",
                     },
                     {
