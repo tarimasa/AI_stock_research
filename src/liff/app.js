@@ -5,6 +5,25 @@ const WEBHOOK_BASE_URL = "https://YOUR-CONTAINER-APP.japaneast.azurecontainerapp
 let liffUserId = null;
 let autoCloseTimer = null;  // 自動クローズタイマーID
 
+/**
+ * liff.init() はwindow.locationを書き換えるため、
+ * mode パラメータは init() を呼ぶ前に読み取って保存する。
+ * liff.state 経由のパラメータ（LINE内ブラウザでよく起きる）にも対応。
+ */
+const _initialMode = (() => {
+  const params = new URLSearchParams(window.location.search);
+  const direct = params.get("mode");
+  if (direct) return direct;
+  try {
+    const liffState = params.get("liff.state");
+    if (liffState) {
+      const stateParams = new URLSearchParams(decodeURIComponent(liffState));
+      return stateParams.get("mode");
+    }
+  } catch (_) {}
+  return null;
+})();
+
 async function initLiff() {
   try {
     await liff.init({ liffId: getLiffId() });
@@ -451,29 +470,10 @@ async function triggerRefresh() {
   }
 }
 
-/**
- * LINEアプリ内LIFFはURLパラメータを liff.state にエンコードする場合がある。
- * 例: ?mode=refresh → ?liff.state=%3Fmode%3Drefresh
- * 両方のパターンに対応して mode パラメータを取得する。
- */
-function getModeParam() {
-  const params = new URLSearchParams(window.location.search);
-  const direct = params.get("mode");
-  if (direct) return direct;
-  // liff.state 経由のフォールバック
-  try {
-    const liffState = params.get("liff.state");
-    if (liffState) {
-      const stateParams = new URLSearchParams(decodeURIComponent(liffState));
-      return stateParams.get("mode");
-    }
-  } catch (_) {}
-  return null;
-}
 
 // mode=refresh でLIFFを開いた場合、自動的に更新を実行
 async function handleRefreshMode() {
-  if (getModeParam() !== "refresh") return;
+  if (_initialMode !== "refresh") return;
 
   // フォームを隠して更新中メッセージを表示
   document.getElementById("portfolioForm").style.display = "none";
@@ -521,7 +521,7 @@ async function handleRefreshMode() {
 // ─────────────────────────────────────────
 
 async function handleBacktestMode() {
-  if (getModeParam() !== "backtest") return;
+  if (_initialMode !== "backtest") return;
 
   document.getElementById("portfolioForm").style.display = "none";
   const resultArea = document.getElementById("resultArea");
