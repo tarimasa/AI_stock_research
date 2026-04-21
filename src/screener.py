@@ -788,6 +788,8 @@ def _apply_stage1_filters(stocks: list[dict]) -> list[dict]:
         rsi14 = float(s.get("rsi14", 50) or 50)
         vol_ratio = float(s.get("vol_ratio", 1) or 1)
         w52_pos = float(s.get("w52_pos", 50) or 50)
+        close_val = float(s.get("close", 0) or 0)
+        sma25_val = float(s.get("sma25", 0) or 0)
 
         # 短期シグナル（最重要）
         if breakout and dvs > 0 and rsi5 <= 30:
@@ -796,29 +798,63 @@ def _apply_stage1_filters(stocks: list[dict]) -> list[dict]:
         elif breakout and dvs > 0:
             score += 60
             signals.append("breakout+dvs正")
+        elif breakout:
+            # DVSが正でなくてもブレイクアウト単独で加点（下落相場での押し目反発を拾う）
+            score += 20
+            signals.append("breakout")
 
-        # 出来高急増
+        # 方向性出来高（DVS単独での加点）
+        if dvs > 30:
+            score += 20
+            signals.append(f"DVS={dvs:.0f}(強い上昇出来高)")
+        elif dvs > 10:
+            score += 10
+            signals.append(f"DVS={dvs:.0f}(上昇出来高)")
+
+        # 出来高急増（1.3倍まで緩和）
         if vol_ratio >= 2.0:
             score += 40
             signals.append(f"出来高{vol_ratio:.1f}倍")
         elif vol_ratio >= 1.5:
             score += 20
             signals.append(f"出来高{vol_ratio:.1f}倍")
+        elif vol_ratio >= 1.3:
+            score += 10
+            signals.append(f"出来高{vol_ratio:.1f}倍")
 
-        # 52週安値圏
-        if w52_pos <= 15:
+        # 52週安値圏（40%まで緩和）
+        if w52_pos <= 20:
             score += 30
             signals.append(f"52w安値圏{w52_pos:.0f}%")
-        elif w52_pos <= 25:
+        elif w52_pos <= 40:
             score += 15
             signals.append(f"52w安値圏{w52_pos:.0f}%")
 
-        # RSI売られすぎ
+        # RSI売られすぎ（40まで緩和）
         if rsi14 <= 25:
             score += 25
             signals.append(f"RSI14={rsi14:.0f}")
-        elif rsi14 <= 30:
+        elif rsi14 <= 35:
+            score += 15
+            signals.append(f"RSI14={rsi14:.0f}")
+        elif rsi14 <= 40:
+            score += 8
+            signals.append(f"RSI14={rsi14:.0f}")
+
+        # RSI5 売られすぎ（短期反転シグナル）
+        if rsi5 <= 20:
+            score += 20
+            signals.append(f"RSI5={rsi5:.0f}(超売られすぎ)")
+        elif rsi5 <= 30:
             score += 10
+            signals.append(f"RSI5={rsi5:.0f}(売られすぎ)")
+
+        # SMA25押し目（下落相場でも拾える）
+        if sma25_val > 0 and close_val > 0:
+            sma25_diff = (close_val - sma25_val) / sma25_val * 100
+            if -8 <= sma25_diff <= -2:
+                score += 15
+                signals.append(f"SMA25比{sma25_diff:.1f}%押し目")
 
         # 弱気シグナルはペナルティ（事実上除外）
         if dvs <= -10:
@@ -838,24 +874,38 @@ def _apply_stage1_filters(stocks: list[dict]) -> list[dict]:
 
 def _apply_stage1_filters_relaxed(stocks: list[dict]) -> list[dict]:
     """
-    通常フィルタで0件になった場合の緩和版フィルタ。最低5件を返す。
+    通常フィルタで0件になった場合の緩和版フィルタ。スコア上位5件を返す。
+    スコアが0でも全銘柄を並べて上位を返すため、必ず結果が出る。
     """
     for s in stocks:
         dvs = float(s.get("dvs", 0) or 0)
+        rsi5 = float(s.get("rsi5", 50) or 50)
         rsi14 = float(s.get("rsi14", 50) or 50)
         vol_ratio = float(s.get("vol_ratio", 1) or 1)
         w52_pos = float(s.get("w52_pos", 50) or 50)
+        breakout = bool(s.get("breakout_5d", False))
         score = 0.0
+        signals = ["緩和フィルタ"]
         if dvs > 0:
             score += 20
-        if rsi14 <= 40:
+            signals.append(f"DVS={dvs:.0f}")
+        if rsi14 <= 45:
             score += 15
+            signals.append(f"RSI14={rsi14:.0f}")
+        if rsi5 <= 35:
+            score += 10
+            signals.append(f"RSI5={rsi5:.0f}")
         if vol_ratio >= 1.2:
             score += 10
-        if w52_pos <= 35:
+            signals.append(f"出来高{vol_ratio:.1f}倍")
+        if w52_pos <= 40:
             score += 10
+            signals.append(f"52w={w52_pos:.0f}%")
+        if breakout:
+            score += 10
+            signals.append("breakout")
         s["stage1_score"] = score
-        s["stage1_signals"] = ["緩和フィルタ"]
+        s["stage1_signals"] = signals
     return sorted(stocks, key=lambda x: x["stage1_score"], reverse=True)[:5]
 
 
