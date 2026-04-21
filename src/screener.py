@@ -15,7 +15,7 @@ import pandas_ta as ta
 from dotenv import load_dotenv
 
 # J-Quants データ取得（yfinance の fetch_ohlcv / fetch_info を置き換え）
-from data_fetcher import fetch_bulk_daily, load_bulk_history
+from data_fetcher import fetch_bulk_daily, load_bulk_history, fetch_info
 import jquants_fetcher
 
 # Layer 2: データ強化モジュール
@@ -333,9 +333,15 @@ def _fetch_and_score(
         df = load_bulk_history(code4, days=252)
 
         # info 辞書の構築:
-        #   - 決算日: earnings_signal から取得（yfinance earningsTimestamp の代替）
-        #   - PER/PBR: J-Quants 日足データにはなし（スコアなしになる、最大 10 点の損失）
+        # JQUANTS_API_KEY 未設定時は yfinance から PER/PBR/権利落ち日/配当を補完する。
+        # これにより GitHub Actions（J-Quants 使用）との採点ロジックを統一する。
         info: dict = {}
+        if not os.environ.get("JQUANTS_API_KEY"):
+            try:
+                info = fetch_info(f"{code4}.T")
+            except Exception:
+                pass
+
         if upcoming_earnings:
             earn_info = upcoming_earnings.get(code4)
             if earn_info:
