@@ -128,20 +128,40 @@ def get_trading_days(start: str, end: str, client=None) -> list[str]:
 
 # ── データダウンロード ─────────────────────────────────────────────────────────
 
+_OHLCV_DEBUG_PRINTED = False  # 1回だけカラム名を表示するフラグ
+
+
 def _normalize_ohlcv(df: pd.DataFrame, date_str: str) -> pd.DataFrame:
-    """JQuantsのDataFrameをOHLCV標準形式に変換する。"""
-    # 調整済み価格を優先採用
-    adj_map = {
-        "AdjustmentOpen":   "Open",
-        "AdjustmentHigh":   "High",
-        "AdjustmentLow":    "Low",
-        "AdjustmentClose":  "Close",
-        "AdjustmentVolume": "Volume",
-    }
+    """
+    JQuantsのDataFrameをOHLCV標準形式に変換する。
+    カラム名の大文字小文字・調整済み/未調整のバリエーションに対応。
+    調整済み価格（AdjustmentClose等）を優先し、なければ通常価格を使用。
+    """
+    global _OHLCV_DEBUG_PRINTED
     df = df.copy()
-    for src, dst in adj_map.items():
-        if src in df.columns:
-            df[dst] = df[src]
+
+    # 全カラム名を小文字でインデックス化（大文字小文字を吸収）
+    col_lower_map: dict[str, str] = {c.lower(): c for c in df.columns}
+
+    if not _OHLCV_DEBUG_PRINTED:
+        print(f"[backtest] APIカラム名（初回確認）: {list(df.columns)[:15]}")
+        _OHLCV_DEBUG_PRINTED = True
+
+    # 優先順位付きカラム候補（調整済み > 通常 > 小文字表記）
+    field_candidates: dict[str, list[str]] = {
+        "Open":   ["adjustmentopen",  "open"],
+        "High":   ["adjustmenthigh",  "high"],
+        "Low":    ["adjustmentlow",   "low"],
+        "Close":  ["adjustmentclose", "close"],
+        "Volume": ["adjustmentvolume","volume"],
+        "Code":   ["code"],
+    }
+
+    for dst, candidates in field_candidates.items():
+        for src_lower in candidates:
+            if src_lower in col_lower_map:
+                df[dst] = df[col_lower_map[src_lower]]
+                break
 
     # Code列を4桁に統一
     if "Code" in df.columns:
@@ -157,6 +177,10 @@ def _normalize_ohlcv(df: pd.DataFrame, date_str: str) -> pd.DataFrame:
     for col in ["Open", "High", "Low", "Close", "Volume"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Close/Openが取れなかった場合は空DataFrameを返す
+    if "Close" not in df.columns or "Open" not in df.columns:
+        return pd.DataFrame()
 
     return df.dropna(subset=["Close", "Open"])
 
@@ -224,13 +248,17 @@ def download_backtest_data(force: bool = False) -> None:
         try:
             date_yyyymmdd = day_str.replace("-", "")
             df = client.get_eq_bars_daily(date_yyyymmdd=date_yyyymmdd)
-            if df is not None and not df.empty:
-                normalized = _normalize_ohlcv(df, day_str)
-                if not normalized.empty:
-                    current_frames.append(normalized)
-                    total_fetched += 1
+            if df is None or df.empty:
+                print(f"    [スキップ] {day_str}: APIが空データを返しました（祝日の可能性）")
+                continue
+            normalized = _normalize_ohlcv(df, day_str)
+            if not normalized.empty:
+                current_frames.append(normalized)
+                total_fetched += 1
+            else:
+                print(f"    [スキップ] {day_str}: 正規化後データなし（カラム不足の可能性）")
         except Exception as e:
-            print(f"    [警告] {day_str} 取得失敗: {e}")
+            print(f"    [警告] {day_str} 取得失敗: {type(e).__name__}: {e}")
 
         if i % 50 == 0:
             print(f"  進捗: {i}/{len(trading_days)}日 ({total_fetched}日取得済み)")
