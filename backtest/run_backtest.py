@@ -147,13 +147,14 @@ def _normalize_ohlcv(df: pd.DataFrame, date_str: str) -> pd.DataFrame:
         print(f"[backtest] APIカラム名（初回確認）: {list(df.columns)[:15]}")
         _OHLCV_DEBUG_PRINTED = True
 
-    # 優先順位付きカラム候補（調整済み > 通常 > 小文字表記）
+    # 優先順位付きカラム候補（調整済み > 通常 > 短縮形 > 小文字表記）
+    # JQuants V2 Lightプランの短縮形: AdjO/AdjH/AdjL/AdjC, O/H/L/C/Vo
     field_candidates: dict[str, list[str]] = {
-        "Open":   ["adjustmentopen",  "open"],
-        "High":   ["adjustmenthigh",  "high"],
-        "Low":    ["adjustmentlow",   "low"],
-        "Close":  ["adjustmentclose", "close"],
-        "Volume": ["adjustmentvolume","volume"],
+        "Open":   ["adjo", "adjustmentopen",   "open",   "o"],
+        "High":   ["adjh", "adjustmenthigh",   "high",   "h"],
+        "Low":    ["adjl", "adjustmentlow",    "low",    "l"],
+        "Close":  ["adjc", "adjustmentclose",  "close",  "c"],
+        "Volume": ["adjvo","adjustmentvolume", "volume", "vo"],
         "Code":   ["code"],
     }
 
