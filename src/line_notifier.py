@@ -216,13 +216,76 @@ def reply_message(reply_token: str, messages: list) -> None:
     resp.raise_for_status()
 
 
+def build_stage1_detail_text(stage1_stocks: list, analysis: dict) -> str:
+    """Stage1通過銘柄とClaudeの判断を一覧表示するテキストを生成する。"""
+    today = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d")
+    n = len(stage1_stocks)
+    lines = [f"📋 Stage1分析詳細 {today}（{n}件）", "─" * 20]
+
+    # Claudeの推奨をコードでインデックス（4桁/6桁両対応）
+    all_recs = analysis.get("all_recommendations", [])
+    recs_by_code: dict = {}
+    for r in all_recs:
+        code = r.get("code", "").replace(".T", "")
+        recs_by_code[code] = r
+        recs_by_code[code[:4]] = r
+
+    for stock in stage1_stocks:
+        raw_code = stock.get("code", "")
+        code4 = raw_code.replace(".T", "")[:4]
+        name = stock.get("name", raw_code)
+
+        rsi5 = stock.get("rsi5")
+        vol = stock.get("vol_ratio")
+        dvs = stock.get("dvs") if stock.get("dvs") is not None else stock.get("directional_vol_score")
+
+        rsi_mark = (f"RSI5={rsi5:.0f}✓" if rsi5 is not None and rsi5 <= 20
+                    else (f"RSI5={rsi5:.0f}" if rsi5 is not None else ""))
+        vol_mark = (f"出来高{vol:.1f}x✓" if vol is not None and vol >= 1.5
+                    else (f"出来高{vol:.1f}x" if vol is not None else ""))
+        dvs_str = f" DVS{dvs:+.0f}" if dvs is not None else ""
+
+        rec = recs_by_code.get(code4) or recs_by_code.get(raw_code.replace(".T", ""))
+
+        if rec is None:
+            emoji = "🔘"
+            detail = "分析対象外"
+        elif rec.get("_invalid"):
+            emoji = "❌"
+            detail = f"除外: {rec.get('_invalid_reason', '')}"
+        elif rec.get("action") == "見送り":
+            emoji = "🔘"
+            reason = rec.get("reason", "")
+            detail = f"見送り: {reason[:40]}" if reason else "見送り"
+        else:
+            action = rec.get("action", "")
+            emoji = ACTION_EMOJI.get(action, "⚪")
+            reason = rec.get("reason", "")
+            tp = rec.get("take_profit_price", 0)
+            detail = f"{action}: {reason[:40]}" if reason else action
+            if tp:
+                detail += f" 目標¥{tp:,}"
+
+        sig_parts = [p for p in [rsi_mark, vol_mark] if p]
+        sig_line = " ".join(sig_parts) + dvs_str if (sig_parts or dvs_str) else ""
+
+        lines.append(f"{emoji} {code4} {name}")
+        if sig_line:
+            lines.append(f"   {sig_line}")
+        lines.append(f"   {detail}")
+
+    return "\n".join(lines)
+
+
 def send_daily_report(
     analysis: dict,
     portfolio_result: dict,
     scan_info: str | None = None,
+    stage1_stocks: list | None = None,
 ) -> None:
     """毎日の推奨レポートを LINE に送信する。
-    scan_info: フッターに追加するスキャン情報（例: "J-Quants全銘柄スキャン: 3,921銘柄→Stage1通過8件"）
+    scan_info: フッターに追加するスキャン情報
+    stage1_stocks: Stage1通過銘柄リスト（詳細を第2メッセージで送信する）
     """
     report_text = build_report_text(analysis, portfolio_result)
     if scan_info:
@@ -234,6 +297,15 @@ def send_daily_report(
 
     flex_msg = build_flex_message(report_text)
     push_message([flex_msg])
+
+    # Stage1通過銘柄の詳細を第2メッセージとして送信
+    if stage1_stocks and "all_recommendations" in analysis:
+        detail_text = build_stage1_detail_text(stage1_stocks, analysis)
+        if DRY_RUN:
+            print("===== DRY RUN: Stage1詳細 =====")
+            print(detail_text)
+            print("==============================")
+        push_message([{"type": "text", "text": detail_text}])
 
 
 def send_error_notification(error_message: str) -> None:
