@@ -991,13 +991,29 @@ def run_full_scan(target_date: str | None = None) -> list[dict]:
 
     print("[screener] 全銘柄スキャン開始...")
 
-    # 1. 全銘柄当日データ一括取得（API → bulk CSV フォールバック）
-    today_df = fetch_bulk_daily(date=target_date)
+    # 1. 全銘柄データ取得
+    #    bulk CSV が5日以内なら API を呼ばずそのまま使用（レート制限節約）
+    #    古い場合は API を試み、失敗時は bulk CSV で代替
+    from datetime import date as _date_cls
+    today_df = None
+    bulk_latest = _get_latest_day_from_bulk_csv()
+    if bulk_latest is not None and not bulk_latest.empty:
+        latest_date = pd.to_datetime(bulk_latest["Date"].max()).date()
+        days_old = (_date_cls.today() - latest_date).days
+        if days_old <= 5:
+            today_df = bulk_latest
+            print(f"[screener] bulk CSV使用（{days_old}日前のデータ）: {len(today_df)}銘柄")
+        else:
+            print(f"[screener] bulk CSV最終日が{days_old}日前 → APIから最新取得を試みる")
+            today_df = fetch_bulk_daily(date=target_date)
+            if today_df is None or today_df.empty:
+                print(f"[screener] API取得失敗 → {days_old}日前のbulk CSVで代替")
+                today_df = bulk_latest
+    else:
+        today_df = fetch_bulk_daily(date=target_date)
+
     if today_df is None or today_df.empty:
-        print("[screener] bulk daily API取得失敗 → bulk CSVの最終日データで代替")
-        today_df = _get_latest_day_from_bulk_csv()
-    if today_df is None or today_df.empty:
-        print("[screener] bulk daily 取得失敗。フルスキャンをスキップ。")
+        print("[screener] データ取得失敗。フルスキャンをスキップ。")
         return []
     today_df = _normalize_jquants_cols(today_df)
     print(f"[screener] 当日データ取得: {len(today_df)}銘柄")
