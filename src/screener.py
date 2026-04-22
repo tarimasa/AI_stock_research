@@ -548,6 +548,34 @@ def _exclude_non_targets(df: pd.DataFrame, master: dict) -> pd.DataFrame:
     return df[mask].copy()
 
 
+def _normalize_jquants_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    JQuants Lightプランの短縮カラム名を標準形式に正規化する。
+    優先順位: 調整済み(AdjO/AdjustmentOpen) > 未調整(O/Open)
+    """
+    col_lower = {c.lower(): c for c in df.columns}
+    field_candidates = {
+        "Open":   ["adjo", "adjustmentopen",   "open",   "o"],
+        "High":   ["adjh", "adjustmenthigh",   "high",   "h"],
+        "Low":    ["adjl", "adjustmentlow",    "low",    "l"],
+        "Close":  ["adjc", "adjustmentclose",  "close",  "c"],
+        "Volume": ["adjvo","adjustmentvolume", "volume", "vo"],
+    }
+    rename_map = {}
+    for dst, candidates in field_candidates.items():
+        if dst not in df.columns:
+            for src_lower in candidates:
+                if src_lower in col_lower and col_lower[src_lower] != dst:
+                    rename_map[col_lower[src_lower]] = dst
+                    break
+    if rename_map:
+        df = df.rename(columns=rename_map)
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
 def _load_all_bulk_history() -> pd.DataFrame | None:
     """
     data/bulk/ 以下の全 bulk CSV を読み込み、long-form DataFrame を返す。
@@ -575,11 +603,24 @@ def _load_all_bulk_history() -> pd.DataFrame | None:
         if date_col != "Date":
             combined = combined.rename(columns={date_col: "Date"})
 
-    for col in ["Open", "High", "Low", "Close", "Volume"]:
-        if col in combined.columns:
-            combined[col] = pd.to_numeric(combined[col], errors="coerce")
+    return _normalize_jquants_cols(combined)
 
-    return combined
+
+def _get_latest_day_from_bulk_csv() -> pd.DataFrame | None:
+    """
+    fetch_bulk_daily() が失敗したときのフォールバック。
+    bulk CSV の最終営業日データ（全銘柄分）を返す。
+    """
+    bulk_df = _load_all_bulk_history()
+    if bulk_df is None or bulk_df.empty:
+        return None
+    if "Date" not in bulk_df.columns:
+        return None
+    latest_date = bulk_df["Date"].max()
+    latest_df = bulk_df[bulk_df["Date"] == latest_date].copy()
+    date_str = latest_date.date() if hasattr(latest_date, "date") else latest_date
+    print(f"[screener] bulk CSV最終日データを使用: {date_str} ({len(latest_df)}銘柄)")
+    return latest_df
 
 
 def _calc_technicals_vectorized(bulk_df: pd.DataFrame) -> pd.DataFrame:
@@ -950,11 +991,15 @@ def run_full_scan(target_date: str | None = None) -> list[dict]:
 
     print("[screener] 全銘柄スキャン開始...")
 
-    # 1. 全銘柄当日データ一括取得（1 API コール）
+    # 1. 全銘柄当日データ一括取得（API → bulk CSV フォールバック）
     today_df = fetch_bulk_daily(date=target_date)
+    if today_df is None or today_df.empty:
+        print("[screener] bulk daily API取得失敗 → bulk CSVの最終日データで代替")
+        today_df = _get_latest_day_from_bulk_csv()
     if today_df is None or today_df.empty:
         print("[screener] bulk daily 取得失敗。フルスキャンをスキップ。")
         return []
+    today_df = _normalize_jquants_cols(today_df)
     print(f"[screener] 当日データ取得: {len(today_df)}銘柄")
 
     # 2. 銘柄マスタ・決算カレンダーを取得
