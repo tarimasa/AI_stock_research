@@ -237,6 +237,7 @@ def _parse_claude_response(message) -> dict:
     if len(valid) < len(validated):
         print(f"[claude_analyzer] RR比不足で {len(validated) - len(valid)} 件の推奨を除外")
     result["recommendations"] = valid
+    result["all_recommendations"] = validated  # 除外分も含む全推奨を保持（LINE詳細表示用）
     if "exit_alerts" not in result:
         result["exit_alerts"] = []
     return result

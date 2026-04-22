@@ -170,7 +170,10 @@ def run_report() -> None:
 
     # Step 7: LINE 送信
     print("[report] LINE 送信中...")
-    line_notifier.send_daily_report(analysis, portfolio_result, scan_info=scan_info)
+    line_notifier.send_daily_report(
+        analysis, portfolio_result, scan_info=scan_info,
+        stage1_stocks=enriched_stocks if FULL_SCAN_ENABLED else None,
+    )
     print("[report] 送信完了")
 
 
