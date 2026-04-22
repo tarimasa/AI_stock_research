@@ -33,10 +33,10 @@ import numpy as np
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
+sys.path.insert(0, str(PROJECT_ROOT / "backtest"))
 
 # run_backtest.py の共通関数を再利用
-from backtest.run_backtest import (
+from run_backtest import (
     BACKTEST_START,
     BACKTEST_END,
     WARMUP_CALENDAR_DAYS,
