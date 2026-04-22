@@ -241,7 +241,9 @@ def score_stock(df: pd.DataFrame, info: dict, market_data: dict | None = None) -
     #   RSI14=35（軽い売られすぎ）でも RSI5=15（超売られすぎ）なら直近の急落後の反発期待が高い。
     rsi5 = float(latest.get("RSI_5", 50) or 50)
     rsi5_score = 0
-    if rsi5 <= 20:
+    if rsi5 <= 10:
+        rsi5_score = 40   # 極端売られすぎ: バックテストEV最高シグナル
+    elif rsi5 <= 20:
         rsi5_score = 30   # 超売られすぎ: 強い短期反転シグナル
     elif rsi5 <= 30:
         rsi5_score = 20   # 売られすぎ: 反転期待大
@@ -798,24 +800,30 @@ def _apply_stage1_filters(stocks: list[dict]) -> list[dict]:
         sma25_val = float(s.get("sma25", 0) or 0)
 
         # 短期シグナル（最重要）
-        if breakout and dvs > 0 and rsi5 <= 30:
-            score += 100
+        if breakout and dvs > 0 and rsi5 <= 20:
+            score += 120
+            signals.append("breakout+dvs正+rsi5<20(最優秀)")
+        elif breakout and dvs > 0 and rsi5 <= 30:
+            score += 80
             signals.append("breakout+dvs正+rsi5低")
         elif breakout and dvs > 0:
-            score += 60
+            score += 50
             signals.append("breakout+dvs正")
         elif breakout:
             # DVSが正でなくてもブレイクアウト単独で加点（下落相場での押し目反発を拾う）
             score += 20
             signals.append("breakout")
 
-        # 方向性出来高（DVS単独での加点）
-        if dvs > 30:
-            score += 20
-            signals.append(f"DVS={dvs:.0f}(強い上昇出来高)")
+        # 方向性出来高（DVS単独での加点: バックテストでDVS>20がEV+0.506%）
+        if dvs > 20:
+            score += 30
+            signals.append(f"DVS={dvs:.0f}(強い買い越し)")
         elif dvs > 10:
+            score += 20
+            signals.append(f"DVS={dvs:.0f}(買い越し)")
+        elif dvs > 0:
             score += 10
-            signals.append(f"DVS={dvs:.0f}(上昇出来高)")
+            signals.append(f"DVS={dvs:.0f}(弱い買い越し)")
 
         # 出来高急増（1.3倍まで緩和）
         if vol_ratio >= 2.0:
@@ -847,13 +855,21 @@ def _apply_stage1_filters(stocks: list[dict]) -> list[dict]:
             score += 8
             signals.append(f"RSI14={rsi14:.0f}")
 
-        # RSI5 売られすぎ（短期反転シグナル）
-        if rsi5 <= 20:
-            score += 20
+        # RSI5 売られすぎ（バックテスト最優秀シグナル: RSI5<20+出来高1.5倍 EV+0.708%）
+        if rsi5 <= 10:
+            score += 60
+            signals.append(f"RSI5={rsi5:.0f}(極端売られすぎ)")
+        elif rsi5 <= 20:
+            score += 40
             signals.append(f"RSI5={rsi5:.0f}(超売られすぎ)")
         elif rsi5 <= 30:
-            score += 10
+            score += 15
             signals.append(f"RSI5={rsi5:.0f}(売られすぎ)")
+
+        # RSI5<20 + 出来高1.5倍 = バックテスト最高EV複合シグナル
+        if rsi5 <= 20 and vol_ratio >= 1.5:
+            score += 30
+            signals.append("RSI5<20+出来高急増(複合最優秀)")
 
         # SMA25押し目（下落相場でも拾える）
         if sma25_val > 0 and close_val > 0:
