@@ -31,13 +31,14 @@ def calc_price_candidates(
             "buy_dip": { ... },  # 押し目待ち用（同じ構造）
         }
     """
-    # ── 損切り幅・利益目標（バックテスト最適値: SL-5%/TP+7〜10%/5日保有 EV+0.708%）──
+    # ── 損切り幅・利益目標（バックテスト最適値: SL-5%/TP+7.5〜10%/5日保有 EV+0.708%）
+    # RR比 ≥ 1.5 を確保するため TP下限 = SL × 1.5 = 7.5%
     if holding_days <= 3:
         sl_pct = 6.0 if vix >= 30 else 5.0
-        tp_pct_low, tp_pct_high = 5.0, 10.0
+        tp_pct_low, tp_pct_high = 7.5, 10.0
     else:
         sl_pct = 7.0 if vix >= 30 else 5.0
-        tp_pct_low, tp_pct_high = 7.0, 10.0
+        tp_pct_low, tp_pct_high = 7.5, 10.0
 
     # ── 買い価格候補 ──────────────────────────────────────────────────────
     buy_now = _tick_round(current_price * 0.993)   # 今すぐ買う: 現在値の-0.7%
