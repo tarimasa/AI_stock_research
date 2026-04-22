@@ -41,17 +41,18 @@ jobs:
 
       # ── bulk CSV ダウンロード (Phase 3 / Layer 5 最適化) ─────────────────────
       # FULL_SCAN_ENABLED=true のときだけ実行。
-      # 全銘柄の過去3ヶ月分日足を事前ダウンロードしてベクトル化計算を高速化。
+      # get_eq_bars_daily(date_yyyymmdd=...) で1日ずつ取得（レート制限対策）。
+      # 直近90営業日分を取得し、既存CSVに追記する。
       - name: Download bulk historical data (full scan mode only)
         if: ${{ vars.FULL_SCAN_ENABLED == 'true' }}
         run: |
           python - <<'EOF'
-          import os, sys
+          import os, sys, time
           sys.path.insert(0, "src")
-          os.environ.setdefault("JQUANTS_API_KEY", os.environ.get("JQUANTS_API_KEY", ""))
 
-          from datetime import datetime, timedelta
+          from datetime import datetime, timedelta, date as date_cls
           from pathlib import Path
+          import pandas as pd
           import jquantsapi
 
           api_key = os.environ.get("JQUANTS_API_KEY", "")
@@ -63,34 +64,85 @@ jobs:
           bulk_dir = Path("data/bulk")
           bulk_dir.mkdir(parents=True, exist_ok=True)
 
-          # 直近3ヶ月分をダウンロード
-          today = datetime.today()
-          for delta_months in [2, 1, 0]:
-              # 月初日を算出
-              target = today.replace(day=1) - timedelta(days=delta_months * 30)
-              from_yyyymmdd = target.strftime("%Y%m01")
-              to_yyyymmdd = (target.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
-              to_yyyymmdd = to_yyyymmdd.strftime("%Y%m%d")
-              month_str = target.strftime("%Y-%m")
-              csv_path = bulk_dir / f"daily_{month_str}.csv"
+          # JQuants Lightプランの短縮カラム名 → 標準名に変換
+          def normalize_cols(df):
+              col_lower = {c.lower(): c for c in df.columns}
+              mapping = {
+                  "Open":   ["adjo","adjustmentopen","open","o"],
+                  "High":   ["adjh","adjustmenthigh","high","h"],
+                  "Low":    ["adjl","adjustmentlow","low","l"],
+                  "Close":  ["adjc","adjustmentclose","close","c"],
+                  "Volume": ["adjvo","adjustmentvolume","volume","vo"],
+              }
+              rename = {}
+              for dst, candidates in mapping.items():
+                  if dst not in df.columns:
+                      for src in candidates:
+                          if src in col_lower:
+                              rename[col_lower[src]] = dst
+                              break
+              return df.rename(columns=rename) if rename else df
 
-              if csv_path.exists():
-                  print(f"{month_str}: キャッシュ済みスキップ")
-                  continue
+          # 直近90営業日を列挙（土日除外）
+          today = date_cls.today()
+          business_days = []
+          d = today
+          while len(business_days) < 90:
+              if d.weekday() < 5:
+                  business_days.append(d.strftime("%Y%m%d"))
+              d -= timedelta(days=1)
 
-              print(f"{month_str}: ダウンロード中 ({from_yyyymmdd}〜{to_yyyymmdd})...")
+          # 既存CSVから取得済み日付を把握
+          existing_dates = set()
+          for csv_file in bulk_dir.glob("daily_*.csv"):
               try:
-                  df = client.get_eq_bars_daily_range(
-                      start_dt=from_yyyymmdd,
-                      end_dt=to_yyyymmdd,
-                  )
-                  if df is not None and not df.empty:
-                      df.to_csv(csv_path, index=False)
-                      print(f"  保存完了: {len(df)}行 → {csv_path}")
+                  chunk = pd.read_csv(csv_file, dtype=str, usecols=lambda c: c.lower() in ("date","date_yyyymmdd"))
+                  date_col = next((c for c in chunk.columns if "date" in c.lower()), None)
+                  if date_col:
+                      existing_dates.update(chunk[date_col].str.replace("-","").tolist())
+              except Exception:
+                  pass
+          print(f"既存取得済み日数: {len(existing_dates)}日")
+
+          # 未取得の日付だけダウンロード
+          to_fetch = [d for d in business_days if d not in existing_dates]
+          print(f"新規取得対象: {len(to_fetch)}日")
+
+          month_frames: dict = {}
+          success = 0
+          for i, date_str in enumerate(to_fetch):
+              try:
+                  df = client.get_eq_bars_daily(date_yyyymmdd=date_str)
+                  if df is None or df.empty:
+                      print(f"  {date_str}: データなし（祝日の可能性）")
                   else:
-                      print(f"  データなし")
+                      df = normalize_cols(df)
+                      month_str = f"{date_str[:4]}-{date_str[4:6]}"
+                      if month_str not in month_frames:
+                          month_frames[month_str] = []
+                      month_frames[month_str].append(df)
+                      success += 1
+                      if success % 10 == 0:
+                          print(f"  進捗: {i+1}/{len(to_fetch)} ({success}日取得)")
               except Exception as e:
-                  print(f"  エラー: {e}")
+                  print(f"  {date_str}: エラー {type(e).__name__}: {str(e)[:80]}")
+              time.sleep(0.5)  # レート制限対策: 0.5秒待機
+
+          # 月別CSVに保存（既存データに追記）
+          for month_str, frames in month_frames.items():
+              csv_path = bulk_dir / f"daily_{month_str}.csv"
+              new_df = pd.concat(frames, ignore_index=True)
+              if csv_path.exists():
+                  existing = pd.read_csv(csv_path, dtype=str)
+                  combined = pd.concat([existing, new_df], ignore_index=True)
+                  date_col = next((c for c in combined.columns if c.lower()=="date"), "Date")
+                  combined = combined.drop_duplicates(subset=[date_col, "Code"] if "Code" in combined.columns else date_col)
+                  combined.to_csv(csv_path, index=False)
+              else:
+                  new_df.to_csv(csv_path, index=False)
+              print(f"  保存: {csv_path.name} (+{len(new_df)}行)")
+
+          print(f"ダウンロード完了: {success}/{len(to_fetch)}日取得")
           EOF
         env:
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
