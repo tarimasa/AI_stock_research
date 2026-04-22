@@ -402,6 +402,15 @@ def fetch_bulk_daily(date: str | None = None) -> pd.DataFrame:
                 date_candidates.append(d.strftime("%Y%m%d"))
             d -= timedelta(days=1)
 
+    # JQuants Lightプランの短縮カラム → 標準カラム名マッピング（優先度順）
+    _field_candidates = {
+        "Open":   ["adjo", "adjustmentopen",   "open",   "o"],
+        "High":   ["adjh", "adjustmenthigh",   "high",   "h"],
+        "Low":    ["adjl", "adjustmentlow",    "low",    "l"],
+        "Close":  ["adjc", "adjustmentclose",  "close",  "c"],
+        "Volume": ["adjvo","adjustmentvolume", "volume", "vo"],
+    }
+
     for date_str in date_candidates:
         try:
             df = client.get_eq_bars_daily(date_yyyymmdd=date_str)
@@ -409,15 +418,27 @@ def fetch_bulk_daily(date: str | None = None) -> pd.DataFrame:
                 print(f"[data_fetcher] {date_str}: データなし、前日を試みます")
                 continue
 
+            # カラム名を正規化（短縮形 / 調整済み優先）
+            col_lower = {c.lower(): c for c in df.columns}
+            rename_map = {}
+            for dst, candidates in _field_candidates.items():
+                if dst not in df.columns:
+                    for src_lower in candidates:
+                        if src_lower in col_lower:
+                            rename_map[col_lower[src_lower]] = dst
+                            break
+            if rename_map:
+                df = df.rename(columns=rename_map)
+
             for col in ["Open", "High", "Low", "Close", "Volume"]:
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors="coerce")
 
-            print(f"[data_fetcher] bulk daily 取得: {date_str} ({len(df)}銘柄)")
+            print(f"[data_fetcher] bulk daily 取得: {date_str} ({len(df)}銘柄) cols={list(df.columns)[:8]}")
             return df
 
         except Exception as e:
-            print(f"[data_fetcher] {date_str} bulk daily 取得失敗: {e}")
+            print(f"[data_fetcher] {date_str} bulk daily 取得失敗: {type(e).__name__}: {e}")
 
     print("[data_fetcher] J-Quants bulk daily: 直近4日分のデータ取得に失敗")
     return pd.DataFrame()
