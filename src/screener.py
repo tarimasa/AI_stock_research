@@ -752,7 +752,7 @@ def _calc_technicals_individual(
             info_m = master.get(code4, {})
             return {
                 "code": code4,
-                "name": info_m.get("name", ""),
+                "name": info_m.get("name") or code4,
                 "sector": info_m.get("sector33", ""),
                 "close": pc["close"],
                 "volume": pc["volume"],
@@ -802,7 +802,7 @@ def _calc_technicals_for_fullscan(
             info_m = master.get(code4, {})
             results.append({
                 "code": code4,
-                "name": info_m.get("name", ""),
+                "name": info_m.get("name") or code4,
                 "sector": info_m.get("sector33", ""),
                 "close": float(row.get("close", 0) or 0),
                 "volume": float(row.get("volume", 0) or 0),

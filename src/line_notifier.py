@@ -233,7 +233,6 @@ def build_stage1_detail_text(stage1_stocks: list, analysis: dict) -> str:
     for stock in stage1_stocks:
         raw_code = stock.get("code", "")
         code4 = raw_code.replace(".T", "")[:4]
-        name = stock.get("name", raw_code)
 
         rsi5 = stock.get("rsi5")
         vol = stock.get("vol_ratio")
@@ -246,6 +245,12 @@ def build_stage1_detail_text(stage1_stocks: list, analysis: dict) -> str:
         dvs_str = f" DVS{dvs:+.0f}" if dvs is not None else ""
 
         rec = recs_by_code.get(code4) or recs_by_code.get(raw_code.replace(".T", ""))
+
+        # 銘柄名: screenerのmaster→Claudeの推奨→コードの順で取得
+        stock_name = stock.get("name", "")
+        rec_name = rec.get("name", "") if rec else ""
+        name = (stock_name if (stock_name and stock_name != code4)
+                else (rec_name if rec_name else code4))
 
         if rec is None:
             emoji = "🔘"
