@@ -322,7 +322,9 @@ def _build_fullscan_prompt(
     for s in candidates:
         code = s.get("code", "")
         info_m = master.get(code, {})
-        name = info_m.get("name", s.get("name", ""))[:6]
+        # 名前は切り詰めずフルで渡す（[:6]切り詰めはClaudeの幻覚の原因となるため撤廃）。
+        # Claudeが返した name は後段で master を使って上書き（report._fix_recommendation_names）。
+        name = info_m.get("name", s.get("name", ""))
         sector = info_m.get("sector33", s.get("sector", ""))[:4]
         earn = upcoming_earnings.get(code, {})
         earn_str = str(earn.get("days_until", "-")) if earn else "-"

@@ -35,9 +35,20 @@ def _format_stage1_signals(rec: dict) -> str:
     return f"📡 {key}" if key else ""
 
 
-def build_report_text(analysis: dict, portfolio_result: dict) -> str:
-    """推奨レポート＋保有株アラートのテキストを生成。"""
+def build_report_text(analysis: dict, portfolio_result: dict, session: str = "morning") -> str:
+    """推奨レポート＋保有株アラートのテキストを生成。
+
+    session: "morning" = 7:00〜9:00 発注窓 / 9:00 寄付向け
+             "noon"    = 12:00〜13:00 発注窓 / 12:30 後場寄付向け
+    """
     lines = []
+
+    # 発注時刻ヘッダー
+    if session == "noon":
+        lines.append("📣 12:00〜12:30 発注 → 12:30 後場寄付")
+    else:
+        lines.append("📣 07:00〜09:00 発注 → 09:00 前場寄付")
+    lines.append("")
 
     if analysis.get("market_condition") == "悪化":
         lines.append("⛔ 本日は全銘柄買い見送り推奨")
@@ -65,13 +76,18 @@ def build_report_text(analysis: dict, portfolio_result: dict) -> str:
             )
             if sig_line:
                 block += f"   {sig_line}\n"
+            # IFDOCO 3点セット: 証券会社の注文画面にコピペしやすい形式で出力。
+            # 損失率・利益率も併記して発注ミスを減らす。
+            sl_pct = ((buy_p - sl_p) / buy_p * 100) if buy_p > 0 else 0
+            tp_pct = ((tp_p - buy_p) / buy_p * 100) if buy_p > 0 else 0
             block += (
                 f"   保有目安: {hold_days}営業日  "
                 f"リスク: {risk_star} {r.get('risk_comment', '')}\n"
-                f"   ┌─ IFDOCO注文\n"
+                f"   ┌─ IFDOCO 3点セット ─┐\n"
                 f"   │①買い指値   ¥{buy_p:,}\n"
-                f"   │②利確指値   ¥{tp_p:,}\n"
-                f"   └③損切逆指値 ¥{sl_p:,}"
+                f"   │②利確指値   ¥{tp_p:,}  (+{tp_pct:.1f}%)\n"
+                f"   │③損切逆指値 ¥{sl_p:,}  (-{sl_pct:.1f}%)\n"
+                f"   └─ RR比 {r.get('rr_ratio', 0):.2f} ─┘"
             )
             lines.append(block)
 
@@ -117,21 +133,27 @@ def build_report_text(analysis: dict, portfolio_result: dict) -> str:
     return "\n".join(lines)
 
 
-def build_flex_message(report_text: str) -> dict:
-    """レポートテキスト＋LIFF ボタンを Flex Message に組み立てる。"""
+def build_flex_message(report_text: str, session: str = "morning") -> dict:
+    """レポートテキスト＋LIFF ボタンを Flex Message に組み立てる。
+
+    session: "morning" = 朝レポート（前場寄付向け）
+             "noon"    = 昼レポート（後場寄付向け）
+    """
     today = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d")
+    session_label = "昼・後場寄付向け" if session == "noon" else "朝・前場寄付向け"
+    header_color = "#C75300" if session == "noon" else "#1E3A5F"
     return {
         "type": "flex",
-        "altText": f"AI株式リサーチ {today}",
+        "altText": f"AI株式リサーチ {today}（{session_label}）",
         "contents": {
             "type": "bubble",
             "header": {
                 "type": "box",
                 "layout": "vertical",
-                "backgroundColor": "#1E3A5F",
+                "backgroundColor": header_color,
                 "contents": [{
                     "type": "text",
-                    "text": f"🤖 AI株式リサーチ {today}",
+                    "text": f"🤖 AI株式リサーチ {today} ({session_label})",
                     "color": "#FFFFFF",
                     "weight": "bold",
                     "size": "md",
@@ -233,7 +255,8 @@ def build_stage1_detail_text(stage1_stocks: list, analysis: dict) -> str:
     for stock in stage1_stocks:
         raw_code = stock.get("code", "")
         code4 = raw_code.replace(".T", "")[:4]
-        name = stock.get("name", raw_code)
+        # 名前フォールバック: 空文字なら "(銘柄名不明)" を表示（raw_codeの2度表示を避ける）
+        name = stock.get("name") or "(銘柄名不明)"
 
         rsi5 = stock.get("rsi5")
         vol = stock.get("vol_ratio")
@@ -282,12 +305,14 @@ def send_daily_report(
     portfolio_result: dict,
     scan_info: str | None = None,
     stage1_stocks: list | None = None,
+    session: str = "morning",
 ) -> None:
     """毎日の推奨レポートを LINE に送信する。
     scan_info: フッターに追加するスキャン情報
     stage1_stocks: Stage1通過銘柄リスト（詳細を第2メッセージで送信する）
+    session: "morning"=朝の寄付向け, "noon"=昼の後場寄付向け
     """
-    report_text = build_report_text(analysis, portfolio_result)
+    report_text = build_report_text(analysis, portfolio_result, session=session)
     if scan_info:
         report_text += f"\n\n🔍 {scan_info}"
     if DRY_RUN:
@@ -295,7 +320,7 @@ def send_daily_report(
         print(report_text)
         print("====================================")
 
-    flex_msg = build_flex_message(report_text)
+    flex_msg = build_flex_message(report_text, session=session)
     push_message([flex_msg])
 
     # Stage1通過銘柄の詳細を第2メッセージとして送信
