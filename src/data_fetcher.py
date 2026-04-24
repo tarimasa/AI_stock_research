@@ -27,6 +27,161 @@ def fetch_ohlcv(ticker: str, days: int = 90) -> pd.DataFrame:
     return df.tail(days)
 
 
+def fetch_intraday_ohlcv(
+    ticker: str,
+    interval: str = "15m",
+    days: int = 5,
+) -> pd.DataFrame:
+    """
+    日中足（15分足など）の OHLCV を取得する（昼寄りスクリーン用）。
+
+    Args:
+        ticker: "7203.T" 形式。J-Quants では日中足を提供していないため yfinance を使う。
+        interval: "1m" / "5m" / "15m" / "30m" / "60m"。yfinance 制限:
+            - 1m: 直近7日のみ
+            - 2m-90m: 直近60日のみ
+        days: 取得日数（営業日カウントではなくカレンダー日）
+
+    Returns:
+        DataFrame(index=Datetime(UTC or JST), columns=[Open, High, Low, Close, Volume])
+        失敗時は空 DataFrame。
+    """
+    if DRY_RUN:
+        return pd.DataFrame()
+    try:
+        t = yf.Ticker(ticker)
+        df = t.history(period=f"{days}d", interval=interval, prepost=False)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        df = df.dropna(subset=["Close"])
+        return df
+    except Exception as e:
+        print(f"[data_fetcher] intraday 取得失敗 ({ticker}, {interval}): {e}")
+        return pd.DataFrame()
+
+
+def get_morning_session_metrics(ticker: str) -> dict:
+    """
+    本日の東証前場（9:00〜11:30 JST）の集計メトリクスを返す。
+    昼休み（11:30〜12:30）中に呼ばれることを想定。
+
+    Returns:
+        {
+          "date": "YYYY-MM-DD",
+          "prev_close": 前営業日終値,
+          "open_9": 9:00前後の寄付価格,
+          "high": 前場高値,
+          "low": 前場安値,
+          "close_1130": 前引値（直近バーの終値）,
+          "volume": 前場累計出来高,
+          "gap_pct": (open_9 - prev_close) / prev_close * 100,
+          "morning_return_pct": (close_1130 - open_9) / open_9 * 100,
+          "range_pct": (high - low) / open_9 * 100,
+          "bars": 取得した15分バー本数,
+        }
+        データ不足時は {"error": "..."} を返す。
+    """
+    if DRY_RUN:
+        return {
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "prev_close": 2830.0,
+            "open_9": 2840.0,
+            "high": 2870.0,
+            "low": 2835.0,
+            "close_1130": 2860.0,
+            "volume": 1_200_000,
+            "gap_pct": 0.35,
+            "morning_return_pct": 0.70,
+            "range_pct": 1.23,
+            "bars": 10,
+        }
+
+    intraday = fetch_intraday_ohlcv(ticker, interval="15m", days=5)
+    if intraday.empty:
+        return {"error": "no intraday data"}
+
+    # JST のタイムゾーンで今日の日付にマッチするバーだけ残す
+    try:
+        if intraday.index.tz is None:
+            intraday = intraday.tz_localize("UTC")
+        jst_idx = intraday.index.tz_convert("Asia/Tokyo")
+    except Exception:
+        jst_idx = intraday.index
+
+    today_jst = datetime.now().astimezone().strftime("%Y-%m-%d")
+    try:
+        mask = jst_idx.strftime("%Y-%m-%d") == today_jst
+    except Exception:
+        mask = [str(i)[:10] == today_jst for i in jst_idx]
+
+    today_bars = intraday[mask]
+    if today_bars.empty:
+        # フォールバック: 最新日のバーを使用（休場や取得遅延対策）
+        latest_date = jst_idx.strftime("%Y-%m-%d")[-1] if len(jst_idx) > 0 else today_jst
+        mask = jst_idx.strftime("%Y-%m-%d") == latest_date
+        today_bars = intraday[mask]
+        if today_bars.empty:
+            return {"error": "no bars for today"}
+
+    # 前場バー（9:00〜11:30 JST）に絞る
+    try:
+        if today_bars.index.tz is None:
+            today_bars = today_bars.tz_localize("UTC")
+        bars_jst = today_bars.tz_convert("Asia/Tokyo")
+    except Exception:
+        bars_jst = today_bars
+
+    hours = bars_jst.index.hour
+    minutes = bars_jst.index.minute
+    morning_mask = [
+        (9 <= h < 11) or (h == 11 and m <= 30)
+        for h, m in zip(hours, minutes)
+    ]
+    morning_bars = bars_jst[morning_mask]
+
+    if morning_bars.empty:
+        return {"error": "no morning bars"}
+
+    # 前日終値を日足から取得
+    prev_close = 0.0
+    try:
+        daily = fetch_ohlcv(ticker, days=3)
+        if not daily.empty:
+            # 今日の日付を除いた最新営業日の終値
+            daily_dates = [str(i)[:10] for i in daily.index]
+            prev_idx = [i for i, d in enumerate(daily_dates) if d != today_jst]
+            if prev_idx:
+                prev_close = float(daily["Close"].iloc[prev_idx[-1]])
+            else:
+                prev_close = float(daily["Close"].iloc[-1])
+    except Exception:
+        pass
+
+    open_9 = float(morning_bars["Open"].iloc[0])
+    high = float(morning_bars["High"].max())
+    low = float(morning_bars["Low"].min())
+    close_1130 = float(morning_bars["Close"].iloc[-1])
+    volume = float(morning_bars["Volume"].sum())
+
+    gap_pct = (open_9 - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
+    morning_return_pct = (close_1130 - open_9) / open_9 * 100 if open_9 > 0 else 0.0
+    range_pct = (high - low) / open_9 * 100 if open_9 > 0 else 0.0
+
+    return {
+        "date": today_jst,
+        "prev_close": round(prev_close, 2) if prev_close else None,
+        "open_9": round(open_9, 2),
+        "high": round(high, 2),
+        "low": round(low, 2),
+        "close_1130": round(close_1130, 2),
+        "volume": int(volume),
+        "gap_pct": round(gap_pct, 2),
+        "morning_return_pct": round(morning_return_pct, 2),
+        "range_pct": round(range_pct, 2),
+        "bars": int(len(morning_bars)),
+    }
+
+
 def fetch_info(ticker: str) -> dict:
     """ticker.info から PER/PBR/配当利回りなどを返す。"""
     t = yf.Ticker(ticker)

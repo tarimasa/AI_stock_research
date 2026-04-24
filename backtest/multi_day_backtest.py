@@ -40,6 +40,7 @@ from run_backtest import (
     BACKTEST_START,
     BACKTEST_END,
     WARMUP_CALENDAR_DAYS,
+    ROUND_TRIP_COST_PCT,
     load_all_data,
     calc_all_signals,
     apply_basic_filter,
@@ -154,23 +155,37 @@ def compute_outcomes(
     tp_pct: float,
     sl_pct: float,
     max_days: int,
+    holding_mode: str = "overnight",
+    cost_pct: float = ROUND_TRIP_COST_PCT,
 ) -> pd.Series:
     """
     各シグナル行のリターンを計算して返す（ベクトル化）。
 
     ロジック:
       エントリー = 翌日始値（n1_open）
-      max_days日以内にTP/SLに到達したら決済、到達しなければmax_days日目の終値で決済。
+      max_days日以内にTP/SLに到達したら決済、到達しなければmax_days日目で決済。
       同日にTPとSLの両方ヒット → SL優先（保守的）。
       逆順パスにより、最も早い決済日が自動的に確定する。
+
+    holding_mode:
+      "overnight": TP/SL未到達時は max_days 日目の終値で決済
+      "half_day":  TP/SL未到達時は max_days 日目の (始値+終値)/2 で決済（後場寄付近似）
+
+    cost_pct: 往復取引コスト%。結果から減算する。
     """
     entry    = df["n1_open"]
     tp_price = entry * (1 + tp_pct / 100)
     sl_price = entry * (1 + sl_pct / 100)
 
-    # デフォルト: max_days日目の終値で決済
+    # TP/SL 未到達時のデフォルト決済価格
     last_close_col = f"n{max_days}_close"
-    result = ((df[last_close_col] - entry) / entry * 100).copy()
+    if holding_mode == "half_day":
+        last_open_col = f"n{max_days}_open"
+        default_exit = (df[last_open_col] + df[last_close_col]) / 2.0
+    else:
+        default_exit = df[last_close_col]
+
+    result = ((default_exit - entry) / entry * 100).copy()
 
     # 逆順パス: 早い日ほど後から上書きされ最終的に残る（最早決済が勝つ）
     for day in range(max_days, 0, -1):
@@ -185,7 +200,8 @@ def compute_outcomes(
         # SL上書き（同日両ヒット時もSL優先）
         result = result.where(~sl_hit, other=sl_pct)
 
-    return result
+    # 取引コストを減算（現実的 EV）
+    return result - cost_pct
 
 
 # ── 統計量計算 ────────────────────────────────────────────────────────────────
@@ -227,16 +243,25 @@ def _calc_stats(
 
 # ── グリッドサーチ ────────────────────────────────────────────────────────────
 
-def run_grid_search(df: pd.DataFrame, min_n: int = 50) -> pd.DataFrame:
+def run_grid_search(
+    df: pd.DataFrame,
+    min_n: int = 50,
+    holding_mode: str = "overnight",
+    cost_pct: float = ROUND_TRIP_COST_PCT,
+) -> pd.DataFrame:
     """
     TP/SL/保有日数/シグナルフィルタの全組み合わせで成績を計算する。
+
+    holding_mode: "overnight" or "half_day"
+    cost_pct: 往復取引コスト%
     """
     max_days_all = max(DAYS_LIST)
 
     # Stage1通過かつ翌日始値があるものだけを対象
     base_mask = (df["stage1_score"] > 0) & df["n1_open"].notna()
     df_base = df[base_mask].copy()
-    print(f"[multi] グリッドサーチ対象: {len(df_base):,}シグナル")
+    print(f"[multi] グリッドサーチ対象: {len(df_base):,}シグナル "
+          f"(mode={holding_mode}, cost={cost_pct:.2f}%)")
 
     total_combos = len(TP_LIST) * len(SL_LIST) * len(DAYS_LIST)
     print(f"[multi] 組み合わせ数: TP{len(TP_LIST)} × SL{len(SL_LIST)} × 日数{len(DAYS_LIST)} "
@@ -266,7 +291,10 @@ def run_grid_search(df: pd.DataFrame, min_n: int = 50) -> pd.DataFrame:
                 combo_idx += 1
 
                 # この(tp, sl, max_days)組み合わせの全アウトカムを計算
-                outcome_series = compute_outcomes(df_valid, tp, sl, max_days)
+                outcome_series = compute_outcomes(
+                    df_valid, tp, sl, max_days,
+                    holding_mode=holding_mode, cost_pct=cost_pct,
+                )
 
                 for fname, fmask_full in filter_masks.items():
                     # df_valid に合わせたマスク
@@ -389,9 +417,26 @@ def generate_report(results_df: pd.DataFrame) -> None:
 # ── メイン ────────────────────────────────────────────────────────────────────
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="複数パターン・複数保有日数のバックテスト")
+    parser.add_argument(
+        "--holding-mode",
+        choices=["overnight", "half_day"],
+        default="overnight",
+        help="保有モード: overnight(日跨ぎ) / half_day(後場寄付手仕舞い近似)",
+    )
+    parser.add_argument(
+        "--cost-pct",
+        type=float,
+        default=ROUND_TRIP_COST_PCT,
+        help=f"往復取引コスト%% (既定: {ROUND_TRIP_COST_PCT:.2f}%%)",
+    )
+    args = parser.parse_args()
+
     print("=" * 72)
     print("複数パターン バックテスト（1〜5日保有）")
     print(f"期間: {BACKTEST_START} 〜 {BACKTEST_END}")
+    print(f"保有モード: {args.holding_mode}   往復コスト: {args.cost_pct:.2f}%")
     print("=" * 72)
 
     # ── データ読み込み ─────────────────────────────────────────────────────
@@ -431,7 +476,9 @@ def main():
           f"({df_test['Code'].nunique()}銘柄 × {df_test['Date'].nunique()}日)")
 
     # ── グリッドサーチ ─────────────────────────────────────────────────────
-    results_df = run_grid_search(df_test)
+    results_df = run_grid_search(
+        df_test, holding_mode=args.holding_mode, cost_pct=args.cost_pct
+    )
 
     if results_df.empty:
         print("[multi] 結果が取得できませんでした。")
