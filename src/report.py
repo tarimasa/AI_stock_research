@@ -78,17 +78,95 @@ def _build_name_lookup(enriched_stocks: list) -> dict:
     return lookup
 
 
+def _build_authoritative_name_lookup() -> dict:
+    """
+    enriched_stocks に依存しない権威ソース（watchlist + master）のみで lookup を構築する。
+    enriched_stocks の name が空のときに信頼できる引き元として使う。
+    """
+    lookup: dict = {}
+    try:
+        watchlist = _load_watchlist()
+        for item in watchlist.get("stocks", []):
+            code4 = item.get("code", "").replace(".T", "")[:4]
+            name = item.get("name", "")
+            if code4 and name:
+                lookup[code4] = name
+    except Exception:
+        pass
+
+    try:
+        master = get_master()
+        for code4, info in master.items():
+            name = info.get("name", "")
+            if code4 and name:
+                lookup[code4] = name
+    except Exception:
+        pass
+
+    return lookup
+
+
+def _fill_stock_names_from_lookup(stocks: list, lookup: dict) -> int:
+    """
+    stocks の各 dict について name が空なら lookup から充填する。
+    Returns: 充填件数。
+    """
+    if not stocks or not lookup:
+        return 0
+    filled = 0
+    for s in stocks:
+        if s.get("name"):
+            continue
+        raw_code = str(s.get("code", ""))
+        code4 = raw_code.replace(".T", "")[:4]
+        if not code4 or not code4.isdigit():
+            continue
+        name = lookup.get(code4)
+        if name:
+            s["name"] = name
+            filled += 1
+    return filled
+
+
+def _diagnose_missing_names(stocks: list, lookup: dict) -> None:
+    """
+    Stage1 候補のうち lookup にすら無いコードを警告ログ出力する。
+    マスターキャッシュが古い／J-Quants が当該銘柄を返していない可能性を可視化する。
+    """
+    missing = []
+    for s in stocks or []:
+        code4 = str(s.get("code", "")).replace(".T", "")[:4]
+        if not code4 or not code4.isdigit():
+            continue
+        if code4 not in lookup:
+            missing.append(code4)
+    if missing:
+        print(
+            f"[report] WARNING: 名前が引けない銘柄 {len(missing)}件: {missing[:10]}... "
+            f"master 強制更新を検討してください。lookup_size={len(lookup)}"
+        )
+
+
 def _fix_recommendation_names(analysis: dict, enriched_stocks: list) -> None:
     """
     Claudeが返した推奨・エグジット警告の銘柄名を権威ソースで上書きする。
-    Claudeは銘柄名を誤ることがある（特にマイナー銘柄や名前が長い銘柄）ため、
-    master_manager と watchlist を使って再引きする。
+    あわせて enriched_stocks (=stage1_stocks) の空 name も lookup で充填する。
 
-    ログ: 元の名前と異なる場合のみ print で差分を表示（デバッグ用）。
+    Claude は銘柄名を誤ることがある（特にマイナー銘柄や名前が長い銘柄）ため、
+    master_manager と watchlist を使って再引きする。
     """
     lookup = _build_name_lookup(enriched_stocks)
     if not lookup:
         return
+
+    # enriched_stocks の空 name を埋める（Stage1詳細表示用）
+    auth_lookup = _build_authoritative_name_lookup()
+    filled = _fill_stock_names_from_lookup(enriched_stocks, auth_lookup)
+    if filled:
+        print(f"[report] Stage1 銘柄名を lookup から充填: {filled}件")
+    _diagnose_missing_names(enriched_stocks, auth_lookup)
+    # lookup 自体も更新（enriched_stocks に充填された名前を反映）
+    lookup = _build_name_lookup(enriched_stocks)
 
     def _fix_in_list(items: list, label: str) -> None:
         for item in items or []:
