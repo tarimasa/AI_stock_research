@@ -101,5 +101,80 @@ class TestFixRecommendationNames:
         assert "ソニー" in analysis["exit_alerts"][0]["name"]
 
 
+class TestFillStockNamesFromLookup:
+    def test_fills_empty_names(self):
+        """name 空の stock dict が lookup から充填される。"""
+        stocks = [
+            {"code": "7203", "name": ""},
+            {"code": "6758.T", "name": ""},
+            {"code": "7203.T", "name": "既存トヨタ"},  # 非空はスキップ
+        ]
+        lookup = {"7203": "トヨタ自動車", "6758": "ソニーグループ"}
+        filled = report._fill_stock_names_from_lookup(stocks, lookup)
+        assert filled == 2
+        assert stocks[0]["name"] == "トヨタ自動車"
+        assert stocks[1]["name"] == "ソニーグループ"
+        assert stocks[2]["name"] == "既存トヨタ"
+
+    def test_no_lookup_match_keeps_empty(self):
+        stocks = [{"code": "9999", "name": ""}]
+        lookup = {"7203": "トヨタ自動車"}
+        filled = report._fill_stock_names_from_lookup(stocks, lookup)
+        assert filled == 0
+        assert stocks[0]["name"] == ""
+
+    def test_empty_inputs_safe(self):
+        assert report._fill_stock_names_from_lookup([], {"7203": "X"}) == 0
+        assert report._fill_stock_names_from_lookup([{"code": "7203"}], {}) == 0
+
+
+class TestStage1NamesFilledViaFix:
+    """_fix_recommendation_names が enriched_stocks の空 name も埋めることを検証。"""
+
+    def test_stage1_empty_names_filled_from_authoritative_lookup(self):
+        """master/watchlist にあるコードなら stage1_stocks の空 name も充填される。"""
+        enriched = [
+            {"code": "7203", "name": ""},   # watchlist にある
+            {"code": "6758.T", "name": ""}, # watchlist にある
+        ]
+        analysis = {
+            "recommendations": [],
+            "exit_alerts": [],
+            "all_recommendations": [],
+        }
+        report._fix_recommendation_names(analysis, enriched)
+        assert "トヨタ" in enriched[0]["name"]
+        assert "ソニー" in enriched[1]["name"]
+
+    def test_stage1_unknown_code_remains_empty(self):
+        """lookup にないコードは empty のまま（→ LINE で「(銘柄名不明)」表示）。"""
+        enriched = [{"code": "9999", "name": ""}]
+        analysis = {"recommendations": [], "exit_alerts": [], "all_recommendations": []}
+        report._fix_recommendation_names(analysis, enriched)
+        assert enriched[0]["name"] == ""
+
+
+class TestDetectColumn:
+    def test_master_manager_detect_column_handles_variants(self):
+        """master_manager._detect_column が CompanyName / Name / 略称を吸収する。"""
+        import pandas as pd
+        from master_manager import _detect_column
+
+        df1 = pd.DataFrame(columns=["Code", "CompanyName", "MarketCode"])
+        assert _detect_column(df1, ["CompanyName", "Name"]) == "CompanyName"
+
+        df2 = pd.DataFrame(columns=["Code", "Name", "MarketCode"])
+        assert _detect_column(df2, ["CompanyName", "Name"]) == "Name"
+
+        df3 = pd.DataFrame(columns=["code", "company_name_jp"])
+        # 候補リストにマッチしないがパターン語にはマッチ → fallback
+        assert _detect_column(
+            df3, ["CompanyName", "Name"], pattern_keywords=["companyname", "name"]
+        ) == "company_name_jp"
+
+        df4 = pd.DataFrame(columns=["x", "y"])
+        assert _detect_column(df4, ["CompanyName", "Name"]) is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
