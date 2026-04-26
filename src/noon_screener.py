@@ -162,7 +162,10 @@ def apply_noon_filter(stage1_candidates: list[dict]) -> list[dict]:
 
     # 弱気ギャップや負のスコアは除外
     filtered = [s for s in enriched if s.get("noon_score", 0) > 0]
-    result = sorted(filtered, key=lambda x: x.get("noon_score", 0), reverse=True)[:NOON_MAX_STOCKS]
+    # スコア降順 + コード昇順で決定論的にソート（境界の同点銘柄を安定させる）
+    result = sorted(
+        filtered, key=lambda x: (-x.get("noon_score", 0), str(x.get("code", "")))
+    )[:NOON_MAX_STOCKS]
 
     print(f"[noon_screener] 前場付与完了: {len(enriched)}銘柄 → 通過 {len(result)}銘柄")
     return result
