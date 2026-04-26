@@ -65,7 +65,7 @@ jobs:
               LIFF_URL="${{ secrets.LIFF_URL }}" \
               JQUANTS_API_KEY="${{ secrets.JQUANTS_API_KEY }}" \
               AZURE_STORAGE_CONNECTION_STRING="${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
-              MAX_STOCKS_TO_ANALYZE="10" \
+              MAX_STOCKS_TO_ANALYZE="${{ vars.MAX_STOCKS_TO_ANALYZE || '20' }}" \
               FULL_SCAN_ENABLED="${{ vars.FULL_SCAN_ENABLED || 'false' }}"
 
       - name: デプロイ完了確認
