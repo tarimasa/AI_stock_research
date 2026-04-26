@@ -181,7 +181,7 @@ jobs:
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
           DRY_RUN: 'false'
           SESSION: ${{ steps.session.outputs.value }}
-          MAX_STOCKS_TO_ANALYZE: '10'
+          MAX_STOCKS_TO_ANALYZE: '20'
           # フルスキャンモード: GitHub Variables で FULL_SCAN_ENABLED=true に設定して有効化
           FULL_SCAN_ENABLED: ${{ vars.FULL_SCAN_ENABLED || 'false' }}
           # 移行期間中の並行比較: SCAN_COMPARE=true で差分ログを出力

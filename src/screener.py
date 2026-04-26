@@ -24,7 +24,7 @@ from master_manager import get_master
 
 load_dotenv()
 
-MAX_STOCKS = int(os.environ.get("MAX_STOCKS_TO_ANALYZE", 10))
+MAX_STOCKS = int(os.environ.get("MAX_STOCKS_TO_ANALYZE", 20))
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 # 並列ワーカー数: yfinance のレートリミットを考慮して 6 に設定。
 # 環境変数 SCREENER_WORKERS で上書き可能。
@@ -1051,12 +1051,13 @@ def run_full_scan(target_date: str | None = None) -> list[dict]:
         print("[screener] 候補0件。緩和フィルタを適用。")
         filtered = _apply_stage1_filters_relaxed(scored)
 
-    # 6. スコア降順 + コード昇順で決定論的にソート → 上位10件
+    # 6. スコア降順 + コード昇順で決定論的にソート → 上位 MAX_STOCKS 件
     # 注: 単純な reverse=True 降順だと、ThreadPoolExecutor の完了順や
     # iterrows 順により同点銘柄が境界線上で実行ごとに入れ替わるため、
     # コードでタイブレークして再現性を担保する（ユーザー報告 #20 対応）。
+    # 上限は MAX_STOCKS_TO_ANALYZE 環境変数で調整可能（既定 20、機会損失抑制のため拡張）
     result = sorted(
         filtered, key=lambda x: (-x["stage1_score"], str(x.get("code", "")))
-    )[:10]
+    )[:MAX_STOCKS]
     print(f"[screener] フルスキャン完了: {len(result)}銘柄を Stage 2 に渡す")
     return result
