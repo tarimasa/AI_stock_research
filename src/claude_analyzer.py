@@ -32,6 +32,10 @@ MODEL = "claude-haiku-4-5-20251001"
 MAX_RETRIES = 3
 # タイムアウトを 180 秒に延長（全銘柄スキャン版はプロンプトが大きい）
 _TIMEOUT = httpx.Timeout(180.0, connect=10.0)
+# 短期投資の運用判断には再現性が重要なので temperature=0 で確定的応答にする。
+# 同一プロンプトに対して毎回同じ推奨が返るようになる（ユーザー報告 #20 対応）。
+# 環境変数 CLAUDE_TEMPERATURE で上書き可能（探索用に 0.3 などにも設定可能）。
+_TEMPERATURE = float(os.environ.get("CLAUDE_TEMPERATURE", 0.0))
 
 # ── システムプロンプト（圧縮版 ≤800 トークン） ────────────────────────────
 SYSTEM_PROMPT = """\
@@ -264,6 +268,7 @@ def analyze(
             message = client.messages.create(
                 model=MODEL,
                 max_tokens=4096,
+                temperature=_TEMPERATURE,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_prompt}],
             )
@@ -409,6 +414,7 @@ def analyze_with_claude_safe(
             message = client.messages.create(
                 model=MODEL,
                 max_tokens=4096,
+                temperature=_TEMPERATURE,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user}],
             )
@@ -462,6 +468,7 @@ def analyze_with_claude_cached(
             message = client.messages.create(
                 model=MODEL,
                 max_tokens=4096,
+                temperature=_TEMPERATURE,
                 system=[
                     {
                         "type": "text",

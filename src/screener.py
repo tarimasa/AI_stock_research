@@ -430,7 +430,12 @@ def screen(stocks: list, market_data: dict | None = None) -> list:
             if result is not None:
                 scored.append(result)
 
-    result_sorted = sorted(scored, key=lambda x: x["score"], reverse=True)[:max_stocks]
+    # スコア降順 + コード昇順（タイブレーカー）で決定論的にソート。
+    # ThreadPoolExecutor の as_completed は完了順なので、入力順に依存する
+    # stable sort のままでは同点の境界銘柄が実行ごとに入れ替わってしまう。
+    result_sorted = sorted(
+        scored, key=lambda x: (-x["score"], str(x.get("code", "")))
+    )[:max_stocks]
     print(f"[screener] スクリーニング完了: {len(scored)}/{len(unique_stocks)}銘柄スコアあり → "
           f"上位{len(result_sorted)}銘柄をClaudeに渡す")
     return result_sorted
@@ -969,7 +974,10 @@ def _apply_stage1_filters_relaxed(stocks: list[dict]) -> list[dict]:
             signals.append("breakout")
         s["stage1_score"] = score
         s["stage1_signals"] = signals
-    return sorted(stocks, key=lambda x: x["stage1_score"], reverse=True)[:5]
+    # スコア降順 + コード昇順で決定論的にソート（同点の境界銘柄を安定させる）。
+    return sorted(
+        stocks, key=lambda x: (-x["stage1_score"], str(x.get("code", "")))
+    )[:5]
 
 
 def run_full_scan(target_date: str | None = None) -> list[dict]:
@@ -1043,7 +1051,12 @@ def run_full_scan(target_date: str | None = None) -> list[dict]:
         print("[screener] 候補0件。緩和フィルタを適用。")
         filtered = _apply_stage1_filters_relaxed(scored)
 
-    # 6. スコア降順 → 上位10件（Stage 2 トークン制限対策）
-    result = sorted(filtered, key=lambda x: x["stage1_score"], reverse=True)[:10]
+    # 6. スコア降順 + コード昇順で決定論的にソート → 上位10件
+    # 注: 単純な reverse=True 降順だと、ThreadPoolExecutor の完了順や
+    # iterrows 順により同点銘柄が境界線上で実行ごとに入れ替わるため、
+    # コードでタイブレークして再現性を担保する（ユーザー報告 #20 対応）。
+    result = sorted(
+        filtered, key=lambda x: (-x["stage1_score"], str(x.get("code", "")))
+    )[:10]
     print(f"[screener] フルスキャン完了: {len(result)}銘柄を Stage 2 に渡す")
     return result
