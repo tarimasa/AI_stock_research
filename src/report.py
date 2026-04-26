@@ -28,6 +28,7 @@ import noon_screener
 import portfolio_tracker
 import price_calculator
 import screener
+import sector_filter
 import signal_tracker
 from master_manager import get_master
 
@@ -35,6 +36,8 @@ from master_manager import get_master
 FULL_SCAN_ENABLED = os.environ.get("FULL_SCAN_ENABLED", "false").lower() == "true"
 # 移行期間中の並行比較フラグ
 SCAN_COMPARE = os.environ.get("SCAN_COMPARE", "false").lower() == "true"
+# セクター集中上限（推奨+保有合計、1セクターあたり）
+MAX_PER_SECTOR = int(os.environ.get("MAX_PER_SECTOR", 1))
 
 
 def _load_watchlist() -> dict:
@@ -188,6 +191,63 @@ def _fix_recommendation_names(analysis: dict, enriched_stocks: list) -> None:
     _fix_in_list(analysis.get("exit_alerts", []), "エグジット警告")
 
 
+def _apply_sector_concentration_filter(analysis: dict, portfolio_result: dict) -> None:
+    """
+    保有銘柄のセクター集中を加味して analysis['recommendations'] を絞り込む。
+    除外件数とセクター内訳を caution に追記し、ログに出力する。
+
+    保有データは portfolio_tracker.check_portfolio() の戻り値（holdings 含む）を渡す。
+    MAX_PER_SECTOR=1（既定）なら同一セクターは保有 + 推奨で 1 銘柄まで。
+    """
+    if not analysis.get("recommendations"):
+        return
+
+    try:
+        watchlist = _load_watchlist()
+    except Exception:
+        watchlist = {}
+
+    try:
+        master = get_master()
+    except Exception:
+        master = {}
+
+    held_counts = sector_filter.get_held_sector_counts(
+        portfolio_result, watchlist, master
+    )
+    if held_counts:
+        held_str = ", ".join(f"{s}×{n}" for s, n in held_counts.items())
+        print(f"[report] 保有セクター: {held_str}")
+
+    kept, removed = sector_filter.filter_by_sector_concentration(
+        analysis["recommendations"],
+        held_counts,
+        max_per_sector=MAX_PER_SECTOR,
+        watchlist=watchlist,
+        master=master,
+    )
+
+    if removed:
+        excluded_lines = [
+            f"{r.get('code', '')[:4]}({r.get('_excluded_sector', '?')})"
+            for r in removed
+        ]
+        notice = f"セクター集中で除外: {', '.join(excluded_lines)}"
+        print(f"[report] {notice} (max_per_sector={MAX_PER_SECTOR})")
+
+        existing = analysis.get("caution") or ""
+        analysis["caution"] = (
+            f"{existing} / {notice}".strip(" /") if existing else notice
+        )
+
+        # 除外された推奨も all_recommendations に保持（Stage1 詳細表示用）
+        for r in removed:
+            r["_invalid"] = True
+            r["_invalid_reason"] = f"セクター{r.get('_excluded_sector', '')}集中で除外"
+
+    analysis["recommendations"] = kept
+
+
 def run_report() -> None:
     """スクリーニング → Claude 分析 → LINE 送信のフルパイプラインを実行する。"""
     print("=== AI株式リサーチBot 起動 ===")
@@ -319,6 +379,9 @@ def run_report() -> None:
     print("[report] ポートフォリオ確認中...")
     portfolio_result = portfolio_tracker.check_portfolio()
 
+    # Step 6.1: セクター集中フィルタ（保有銘柄を考慮して推奨を絞る）
+    _apply_sector_concentration_filter(analysis, portfolio_result)
+
     # Step 7: LINE 送信
     print("[report] LINE 送信中...")
     line_notifier.send_daily_report(
@@ -427,8 +490,13 @@ def run_noon_report() -> None:
     # Step 5.1: 銘柄名を権威ソースで上書き
     _fix_recommendation_names(analysis, noon_candidates)
 
-    # Step 6: ポートフォリオ確認 & LINE 送信
+    # Step 6: ポートフォリオ確認
     portfolio_result = portfolio_tracker.check_portfolio()
+
+    # Step 6.1: セクター集中フィルタ
+    _apply_sector_concentration_filter(analysis, portfolio_result)
+
+    # Step 7: LINE 送信
     line_notifier.send_daily_report(
         analysis, portfolio_result,
         scan_info=scan_info,
