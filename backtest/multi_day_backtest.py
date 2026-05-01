@@ -11,6 +11,8 @@ backtest/multi_day_backtest.py
   - シグナルフィルタ: 25種類
 
 合計 4 × 6 × 5 × 25 = 3,000 通りを一括検証。
+学習期間（TRAIN_START〜TRAIN_END）で最良戦略を探索し、
+検証期間（VAL_START〜VAL_END）で汎化性能を確認する。
 
 【使用方法】
   python3 backtest/multi_day_backtest.py
@@ -20,9 +22,9 @@ backtest/multi_day_backtest.py
   なければ先に run_backtest.py --download を実行。
 
 【出力ファイル】
-  data/backtest/strategy_results.csv   -- 全戦略の成績（3,000行）
-  data/backtest/best_strategies.csv    -- 期待値TOP20
-  data/backtest/top_totalreturn.csv    -- 総利益TOP20
+  data/backtest/strategy_results.csv   -- 全戦略の成績（学習+検証列付き）
+  data/backtest/best_strategies.csv    -- 期待値TOP20（学習EV基準）
+  data/backtest/top_totalreturn.csv    -- 総利益TOP20（学習EV基準）
 """
 
 import sys
@@ -35,11 +37,15 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "backtest"))
 
-# run_backtest.py の共通関数を再利用
+# run_backtest.py の共通関数・定数を再利用
 from run_backtest import (
     BACKTEST_START,
     BACKTEST_END,
     WARMUP_CALENDAR_DAYS,
+    TRAIN_START,
+    TRAIN_END,
+    VAL_START,
+    VAL_END,
     load_all_data,
     calc_all_signals,
     apply_basic_filter,
@@ -197,6 +203,7 @@ def _calc_stats(
     max_days: int,
     filter_name: str,
 ) -> dict:
+    """学習データの統計量を計算してdictで返す。"""
     n = len(returns)
     if n == 0:
         return None
@@ -210,10 +217,16 @@ def _calc_stats(
     total_ev = ev * n   # 全シグナルを取った場合の累積期待値
 
     return {
-        "filter":     filter_name,
-        "tp_pct":     tp_pct,
-        "sl_pct":     sl_pct,
-        "max_days":   max_days,
+        "filter":      filter_name,
+        "tp_pct":      tp_pct,
+        "sl_pct":      sl_pct,
+        "max_days":    max_days,
+        "train_n":     n,
+        "train_ev":    round(ev, 4),
+        "train_tp_rate": round(tp_rate, 2),
+        "train_sl_rate": round(sl_rate, 2),
+        "train_sharpe":  round(sharpe, 4),
+        # 後方互換のため旧フィールド名も保持
         "n":          n,
         "tp_rate":    round(tp_rate, 2),
         "sl_rate":    round(sl_rate, 2),
@@ -225,18 +238,55 @@ def _calc_stats(
     }
 
 
+def _calc_val_stats(
+    val_returns: pd.Series,
+    tp_pct: float,
+    sl_pct: float,
+) -> dict:
+    """検証データの統計量を計算してdictで返す。"""
+    n = len(val_returns)
+    if n == 0:
+        return {
+            "val_n": 0,
+            "val_ev": 0.0,
+            "val_tp_rate": 0.0,
+            "val_sl_rate": 0.0,
+            "generalize": False,
+        }
+    tp_rate = (val_returns == tp_pct).mean() * 100
+    sl_rate = (val_returns == sl_pct).mean() * 100
+    ev      = float(val_returns.mean())
+    return {
+        "val_n":       n,
+        "val_ev":      round(ev, 4),
+        "val_tp_rate": round(tp_rate, 2),
+        "val_sl_rate": round(sl_rate, 2),
+        "generalize":  ev > 0,
+    }
+
+
 # ── グリッドサーチ ────────────────────────────────────────────────────────────
 
-def run_grid_search(df: pd.DataFrame, min_n: int = 50) -> pd.DataFrame:
+def run_grid_search(
+    df_train: pd.DataFrame,
+    df_val: pd.DataFrame,
+    min_n: int = 50,
+) -> pd.DataFrame:
     """
     TP/SL/保有日数/シグナルフィルタの全組み合わせで成績を計算する。
+    学習データ（df_train）で戦略を探索し、検証データ（df_val）で汎化性能を確認する。
     """
     max_days_all = max(DAYS_LIST)
 
     # Stage1通過かつ翌日始値があるものだけを対象
-    base_mask = (df["stage1_score"] > 0) & df["n1_open"].notna()
-    df_base = df[base_mask].copy()
-    print(f"[multi] グリッドサーチ対象: {len(df_base):,}シグナル")
+    train_mask = (df_train["stage1_score"] > 0) & df_train["n1_open"].notna()
+    df_train_base = df_train[train_mask].copy()
+
+    val_mask = (df_val["stage1_score"] > 0) & df_val["n1_open"].notna()
+    df_val_base = df_val[val_mask].copy()
+
+    print(f"[multi] グリッドサーチ対象（学習）: {len(df_train_base):,}シグナル")
+    print(f"[multi] グリッドサーチ対象（検証）: {len(df_val_base):,}シグナル")
 
     total_combos = len(TP_LIST) * len(SL_LIST) * len(DAYS_LIST)
     print(f"[multi] 組み合わせ数: TP{len(TP_LIST)} × SL{len(SL_LIST)} × 日数{len(DAYS_LIST)} "
@@ -244,11 +294,12 @@ def run_grid_search(df: pd.DataFrame, min_n: int = 50) -> pd.DataFrame:
     print("[multi] グリッドサーチ開始（数分かかります）...\n")
 
     # フィルタマスクを事前計算（繰り返し計算を避ける）
-    filter_masks = {}
+    train_filter_masks = {}
+    val_filter_masks   = {}
     for fname, ffunc in SIGNAL_FILTERS.items():
         try:
-            mask = ffunc(df_base)
-            filter_masks[fname] = mask
+            train_filter_masks[fname] = ffunc(df_train_base)
+            val_filter_masks[fname]   = ffunc(df_val_base) if not df_val_base.empty else pd.Series(dtype=bool)
         except Exception as e:
             print(f"  [警告] フィルタ '{fname}' 計算エラー: {e}")
 
@@ -257,29 +308,50 @@ def run_grid_search(df: pd.DataFrame, min_n: int = 50) -> pd.DataFrame:
     t0 = time.time()
 
     for max_days in DAYS_LIST:
-        # max_days日後のデータが必要。なければNaN → 除外
         valid_col = f"n{max_days}_close"
-        df_valid = df_base[df_base[valid_col].notna()].copy()
+        df_train_valid = df_train_base[df_train_base[valid_col].notna()].copy()
+        df_val_valid   = df_val_base[df_val_base[valid_col].notna()].copy() if not df_val_base.empty else pd.DataFrame()
 
         for tp in TP_LIST:
             for sl in SL_LIST:
                 combo_idx += 1
 
-                # この(tp, sl, max_days)組み合わせの全アウトカムを計算
-                outcome_series = compute_outcomes(df_valid, tp, sl, max_days)
+                # 学習データのアウトカム
+                train_outcomes = compute_outcomes(df_train_valid, tp, sl, max_days)
 
-                for fname, fmask_full in filter_masks.items():
-                    # df_valid に合わせたマスク
-                    fmask = fmask_full[fmask_full.index.isin(df_valid.index)]
-                    fmask = fmask.reindex(df_valid.index, fill_value=False)
+                # 検証データのアウトカム（データがある場合のみ）
+                val_outcomes = (
+                    compute_outcomes(df_val_valid, tp, sl, max_days)
+                    if not df_val_valid.empty
+                    else pd.Series(dtype=float)
+                )
 
-                    subset = outcome_series[fmask]
-                    if len(subset) < min_n:
+                for fname in train_filter_masks:
+                    # 学習フィルタ
+                    fmask_train = train_filter_masks[fname]
+                    fmask_train = fmask_train[fmask_train.index.isin(df_train_valid.index)]
+                    fmask_train = fmask_train.reindex(df_train_valid.index, fill_value=False)
+                    train_subset = train_outcomes[fmask_train]
+
+                    if len(train_subset) < min_n:
                         continue
 
-                    s = _calc_stats(subset, tp, sl, max_days, fname)
-                    if s:
-                        results.append(s)
+                    s = _calc_stats(train_subset, tp, sl, max_days, fname)
+                    if s is None:
+                        continue
+
+                    # 検証フィルタ
+                    if fname in val_filter_masks and not val_outcomes.empty:
+                        fmask_val = val_filter_masks[fname]
+                        fmask_val = fmask_val[fmask_val.index.isin(df_val_valid.index)]
+                        fmask_val = fmask_val.reindex(df_val_valid.index, fill_value=False)
+                        val_subset = val_outcomes[fmask_val]
+                    else:
+                        val_subset = pd.Series(dtype=float)
+
+                    vs = _calc_val_stats(val_subset, tp, sl)
+                    s.update(vs)
+                    results.append(s)
 
                 # 進捗表示
                 if combo_idx % 10 == 0:
@@ -297,45 +369,58 @@ def run_grid_search(df: pd.DataFrame, min_n: int = 50) -> pd.DataFrame:
 
 def print_top_strategies(df: pd.DataFrame, title: str, sort_col: str, n: int = 20) -> None:
     top = df.nlargest(n, sort_col)
-    print(f"\n{'='*72}")
+    print(f"\n{'='*80}")
     print(f"  {title}  TOP {n}")
-    print(f"{'='*72}")
+    print(f"{'='*80}")
     print(f"  {'フィルタ':<28} {'TP%':>5} {'SL%':>6} {'日数':>4} "
-          f"{'件数':>6} {'TP率':>6} {'SL率':>6} {'期待値':>7} {'総EV':>9}")
+          f"{'設計件数':>8} {'設計EV':>8} {'検証件数':>8} {'検証EV':>8} {'汎化':>4}")
     print(f"  {'-'*28} {'-'*5} {'-'*6} {'-'*4} "
-          f"{'-'*6} {'-'*6} {'-'*6} {'-'*7} {'-'*9}")
+          f"{'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*4}")
 
     for _, row in top.iterrows():
         filter_short = str(row["filter"])[:28]
+        train_ev = row.get("train_ev", row.get("ev", float("nan")))
+        train_n  = int(row.get("train_n", row.get("n", 0)))
+        val_n    = int(row.get("val_n", 0))
+        val_ev   = row.get("val_ev", float("nan"))
+        generalize = "✅" if row.get("generalize", False) else "❌"
         print(
             f"  {filter_short:<28} {row['tp_pct']:>+5.1f} {row['sl_pct']:>+5.1f}% "
-            f"{int(row['max_days']):>4}日 {int(row['n']):>6} "
-            f"{row['tp_rate']:>5.1f}% {row['sl_rate']:>5.1f}% "
-            f"{row['ev']:>+6.3f}% {row['total_ev']:>9.0f}"
+            f"{int(row['max_days']):>4}日 {train_n:>8} "
+            f"{train_ev:>+7.3f}% {val_n:>8} {val_ev:>+7.3f}% {generalize:>4}"
         )
 
 
 def generate_report(results_df: pd.DataFrame) -> None:
-    """成績レポートを出力してCSVに保存する。"""
+    """成績レポートを出力してCSVに保存する。学習EV基準でソートし過学習チェックを行う。"""
 
-    # EV > 0 の戦略のみ
-    positive = results_df[results_df["ev"] > 0].copy()
-    print(f"\n[multi] 期待値プラスの戦略数: {len(positive):,} / {len(results_df):,}")
+    # train_ev 列が存在しない場合は ev 列にフォールバック
+    if "train_ev" not in results_df.columns and "ev" in results_df.columns:
+        results_df = results_df.copy()
+        results_df["train_ev"] = results_df["ev"]
+    if "train_n" not in results_df.columns and "n" in results_df.columns:
+        results_df = results_df.copy()
+        results_df["train_n"] = results_df["n"]
+
+    # 学習EVがプラスの戦略
+    positive = results_df[results_df["train_ev"] > 0].copy()
+    total    = len(results_df)
+    print(f"\n[multi] 学習期待値プラスの戦略数: {len(positive):,} / {total:,}")
 
     if positive.empty:
         print("[multi] 期待値プラスの戦略が見つかりませんでした。")
         print("  → SLを広げるか保有日数を増やして再検討してください。")
     else:
-        print_top_strategies(positive, "期待値（EV）ランキング", "ev")
+        print_top_strategies(positive, "期待値（設計EV）ランキング", "train_ev")
         print_top_strategies(positive, "総利益（EV × 件数）ランキング", "total_ev")
-        print_top_strategies(positive, "シャープレシオ ランキング", "sharpe")
+        print_top_strategies(positive, "シャープレシオ ランキング", "train_sharpe")
 
     # 総合レポートを表示
-    print(f"\n{'='*72}")
+    print(f"\n{'='*80}")
     print("  ■ TP/SL組み合わせ別 平均期待値（全フィルタ平均）")
-    print(f"{'='*72}")
+    print(f"{'='*80}")
     combo_avg = (
-        results_df.groupby(["tp_pct", "sl_pct"])["ev"]
+        results_df.groupby(["tp_pct", "sl_pct"])["train_ev"]
         .mean()
         .unstack("sl_pct")
         .round(3)
@@ -344,22 +429,60 @@ def generate_report(results_df: pd.DataFrame) -> None:
     combo_avg = combo_avg[[c for c in sorted(combo_avg.columns)]]
     print(combo_avg.to_string())
 
-    print(f"\n{'='*72}")
+    print(f"\n{'='*80}")
     print("  ■ 保有日数別 平均期待値（全TP/SL・フィルタ平均）")
-    print(f"{'='*72}")
-    days_avg = results_df.groupby("max_days")["ev"].agg(["mean", "count"]).round(4)
+    print(f"{'='*80}")
+    days_avg = results_df.groupby("max_days")["train_ev"].agg(["mean", "count"]).round(4)
     print(days_avg.to_string())
+
+    # ── 過学習チェック ────────────────────────────────────────────────────────
+    print(f"\n{'='*80}")
+    print("  【過学習チェック】")
+    print(f"{'='*80}")
+    if "val_ev" in results_df.columns:
+        overfit = results_df[
+            (results_df["train_ev"] > 0) & (results_df["val_ev"] <= 0)
+        ]
+        generalize_ok = results_df[
+            (results_df["train_ev"] > 0) & (results_df["val_ev"] > 0)
+        ]
+        no_val = results_df[
+            (results_df["train_ev"] > 0) & (results_df["val_n"] == 0)
+        ] if "val_n" in results_df.columns else pd.DataFrame()
+
+        print(f"  学習EV>0 の戦略:         {len(positive):,}件")
+        print(f"  うち 検証EV>0（汎化OK）: {len(generalize_ok):,}件")
+        print(f"  うち 検証EV≤0（過学習）: {len(overfit):,}件")
+        if not no_val.empty:
+            print(f"  うち 検証データなし:     {len(no_val):,}件")
+
+        if not overfit.empty:
+            print(f"\n  過学習戦略 TOP10（設計EVが高いが検証EVがマイナス）:")
+            print(f"  {'フィルタ':<28} {'TP%':>5} {'SL%':>6} {'日数':>4} "
+                  f"{'設計EV':>8} {'検証EV':>8}")
+            print(f"  {'-'*28} {'-'*5} {'-'*6} {'-'*4} {'-'*8} {'-'*8}")
+            for _, row in overfit.nlargest(10, "train_ev").iterrows():
+                filter_short = str(row["filter"])[:28]
+                print(
+                    f"  {filter_short:<28} {row['tp_pct']:>+5.1f} {row['sl_pct']:>+5.1f}% "
+                    f"{int(row['max_days']):>4}日 "
+                    f"{row['train_ev']:>+7.3f}% {row['val_ev']:>+7.3f}%"
+                )
+    else:
+        print("  検証データ列（val_ev）が存在しません。")
 
     # ── CSV保存 ───────────────────────────────────────────────────────────────
     all_path = DATA_DIR / "strategy_results.csv"
-    results_df.sort_values("ev", ascending=False).to_csv(
+    # 学習EVでソート
+    sort_col = "train_ev" if "train_ev" in results_df.columns else "ev"
+    results_df.sort_values(sort_col, ascending=False).to_csv(
         all_path, index=False, encoding="utf-8-sig"
     )
     print(f"\n全戦略CSV: {all_path}  ({len(results_df):,}行)")
 
     best_path = DATA_DIR / "best_strategies.csv"
     if not positive.empty:
-        positive.nlargest(20, "ev").to_csv(best_path, index=False, encoding="utf-8-sig")
+        positive.nlargest(20, "train_ev").to_csv(best_path, index=False, encoding="utf-8-sig")
         print(f"EV TOP20: {best_path}")
 
         top_total_path = DATA_DIR / "top_totalreturn.csv"
@@ -370,29 +493,36 @@ def generate_report(results_df: pd.DataFrame) -> None:
 
     # ── 最優秀戦略の要約 ──────────────────────────────────────────────────────
     if not positive.empty:
-        best = positive.loc[positive["ev"].idxmax()]
-        print(f"\n{'='*72}")
-        print("  ★ 最優秀戦略（期待値ベスト）")
-        print(f"{'='*72}")
+        best = positive.loc[positive["train_ev"].idxmax()]
+        print(f"\n{'='*80}")
+        print("  ★ 最優秀戦略（設計期待値ベスト）")
+        print(f"{'='*80}")
         print(f"  フィルタ  : {best['filter']}")
         print(f"  利確      : +{best['tp_pct']:.1f}%")
         print(f"  損切      : {best['sl_pct']:.1f}%")
         print(f"  最大保有日: {int(best['max_days'])}日")
-        print(f"  件数      : {int(best['n']):,}件")
-        print(f"  TP達成率  : {best['tp_rate']:.1f}%")
-        print(f"  SL発動率  : {best['sl_rate']:.1f}%")
-        print(f"  勝率      : {best['win_rate']:.1f}%")
-        print(f"  期待値/trade: {best['ev']:+.4f}%")
+        print(f"  設計件数  : {int(best.get('train_n', best.get('n', 0))):,}件")
+        print(f"  TP達成率  : {best.get('train_tp_rate', best.get('tp_rate', 0)):.1f}%")
+        print(f"  SL発動率  : {best.get('train_sl_rate', best.get('sl_rate', 0)):.1f}%")
+        print(f"  勝率      : {best.get('win_rate', 0):.1f}%")
+        print(f"  設計EV/trade: {best['train_ev']:+.4f}%")
         print(f"  全シグナル累積EV: {best['total_ev']:+.1f}%")
+        if "val_ev" in best:
+            val_n  = int(best.get("val_n", 0))
+            val_ev = best.get("val_ev", float("nan"))
+            generalize = "✅汎化OK" if best.get("generalize", False) else "❌過学習"
+            print(f"  検証件数  : {val_n:,}件")
+            print(f"  検証EV/trade: {val_ev:+.4f}%  {generalize}")
 
 
 # ── メイン ────────────────────────────────────────────────────────────────────
 
 def main():
-    print("=" * 72)
-    print("複数パターン バックテスト（1〜5日保有）")
-    print(f"期間: {BACKTEST_START} 〜 {BACKTEST_END}")
-    print("=" * 72)
+    print("=" * 80)
+    print("複数パターン バックテスト（1〜5日保有）【学習/検証 分割評価】")
+    print(f"学習期間: {TRAIN_START} 〜 {TRAIN_END}")
+    print(f"検証期間: {VAL_START} 〜 {VAL_END}")
+    print("=" * 80)
 
     # ── データ読み込み ─────────────────────────────────────────────────────
     all_data = load_all_data()
@@ -400,10 +530,13 @@ def main():
         print("データがありません。先に run_backtest.py --download を実行してください。")
         return
 
-    start_dt = pd.Timestamp(BACKTEST_START)
-    end_dt   = pd.Timestamp(BACKTEST_END)
+    train_start_dt = pd.Timestamp(TRAIN_START)
+    train_end_dt   = pd.Timestamp(TRAIN_END)
+    val_start_dt   = pd.Timestamp(VAL_START)
+    val_end_dt     = pd.Timestamp(VAL_END)
 
-    warmup_start = start_dt - pd.Timedelta(days=WARMUP_CALENDAR_DAYS)
+    # ウォームアップはTRAIN_STARTの180日前から
+    warmup_start = train_start_dt - pd.Timedelta(days=WARMUP_CALENDAR_DAYS)
     df_full = all_data[all_data["Date"] >= warmup_start].copy()
 
     # 基本フィルタ
@@ -421,17 +554,24 @@ def main():
     max_days_needed = max(DAYS_LIST)
     df_future = prepare_future_prices(df_signals, max_days=max_days_needed)
 
-    # バックテスト期間に絞り込み
-    df_test = df_future[
-        (df_future["Date"] >= start_dt) &
-        (df_future["Date"] <= end_dt)
+    # ── 学習/検証に分割 ───────────────────────────────────────────────────
+    df_train = df_future[
+        (df_future["Date"] >= train_start_dt) &
+        (df_future["Date"] <= train_end_dt)
     ].copy()
 
-    print(f"[multi] テスト期間: {len(df_test):,}行 "
-          f"({df_test['Code'].nunique()}銘柄 × {df_test['Date'].nunique()}日)")
+    df_val = df_future[
+        (df_future["Date"] >= val_start_dt) &
+        (df_future["Date"] <= val_end_dt)
+    ].copy()
 
-    # ── グリッドサーチ ─────────────────────────────────────────────────────
-    results_df = run_grid_search(df_test)
+    print(f"[multi] 学習期間: {len(df_train):,}行 "
+          f"({df_train['Code'].nunique()}銘柄 × {df_train['Date'].nunique()}日)")
+    print(f"[multi] 検証期間: {len(df_val):,}行 "
+          f"({df_val['Code'].nunique()}銘柄 × {df_val['Date'].nunique()}日)")
+
+    # ── グリッドサーチ（学習データで戦略探索、検証データで汎化確認） ──────
+    results_df = run_grid_search(df_train, df_val)
 
     if results_df.empty:
         print("[multi] 結果が取得できませんでした。")
