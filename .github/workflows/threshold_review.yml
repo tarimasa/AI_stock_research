@@ -1,0 +1,67 @@
+name: Monthly Threshold Review
+
+# クラウドに記録された推奨ログを使って現行閾値の振り返りを行い、
+# 推奨閾値を提案する。ローカルの parquet データに依存しないため
+# GitHub Actions 上で完結する。
+
+on:
+  schedule:
+    # 毎月1日 09:30 JST (00:30 UTC) に実行
+    - cron: '30 0 1 * *'
+  workflow_dispatch:
+    inputs:
+      notify_line:
+        description: 'LINEに提案サマリーを通知する'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+concurrency:
+  group: threshold-review
+  cancel-in-progress: false
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run threshold review
+        run: |
+          python scripts/run_threshold_review.py \
+            --output-dir data/threshold_review \
+            ${{ (github.event_name == 'workflow_dispatch' && inputs.notify_line == 'true') && '--notify-line' || '' }}
+        env:
+          AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+          JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
+          # LINE 通知が有効な時のみ参照される
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          DRY_RUN: 'false'
+
+      - name: Upload threshold review report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: threshold-review-${{ github.run_id }}
+          path: |
+            data/threshold_review/latest.txt
+            data/threshold_review/latest.json
+            data/threshold_review/threshold_review_*.txt
+            data/threshold_review/threshold_review_*.json
+          if-no-files-found: warn
+          retention-days: 90
