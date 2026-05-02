@@ -51,7 +51,7 @@ from run_backtest import (
     apply_basic_filter,
 )
 
-DATA_DIR = PROJECT_ROOT / "data" / "backtest"
+DATA_DIR = PROJECT_ROOT / "backtest" / "data"
 
 # ── グリッドサーチのパラメータ ──────────────────────────────────────────────────
 TP_LIST   = [1.5, 2.0, 3.0, 5.0, 7.0, 10.0]  # 利確ライン（%）
