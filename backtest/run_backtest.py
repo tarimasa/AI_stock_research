@@ -450,6 +450,37 @@ def calc_all_signals(bulk_df: pd.DataFrame) -> pd.DataFrame:
 
     df["stage1_score"] = score.round(1)
 
+    # ── 追加ファクター ────────────────────────────────────────────────────────
+    # 直近5日リターン（平均回帰シグナル）
+    df["return_5d"] = g["Close"].transform(
+        lambda x: x.pct_change(5) * 100
+    ).fillna(0.0).clip(-50.0, 50.0)
+
+    # SMA200 & MA200乖離率（長期トレンド軸）
+    df["sma200"] = g["Close"].transform(
+        lambda x: x.rolling(200, min_periods=60).mean()
+    )
+    df["ma200_diff_pct"] = (
+        (df["Close"] - df["sma200"]) / df["sma200"].replace(0, float("nan")) * 100
+    ).fillna(0.0)
+
+    # 月内営業日順位（月初め・月末効果の検証用）
+    unique_dates = sorted(pd.to_datetime(df["Date"].unique()))
+    from collections import defaultdict
+    month_dates: dict = defaultdict(list)
+    for d in unique_dates:
+        month_dates[(d.year, d.month)].append(d)
+    date_to_rank_start: dict = {}
+    date_to_rank_end: dict = {}
+    for dates in month_dates.values():
+        sorted_dates = sorted(dates)
+        for i, d in enumerate(sorted_dates):
+            date_to_rank_start[d] = i + 1
+            date_to_rank_end[d] = len(sorted_dates) - i
+    date_col = pd.to_datetime(df["Date"])
+    df["biz_rank_in_month"]   = date_col.map(date_to_rank_start).fillna(99).astype(int)
+    df["biz_rank_from_end"]   = date_col.map(date_to_rank_end).fillna(99).astype(int)
+
     # 不要な中間列を削除
     drop_cols = ["avg_vol_20", "high_5d_prev", "high_52w", "low_52w",
                  "chg", "up_vol", "down_vol", "up_vol_5", "down_vol_5"]

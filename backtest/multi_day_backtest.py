@@ -129,6 +129,58 @@ SIGNAL_FILTERS = {
         lambda df: (df["rsi5"] < 20) & (_weekday(df) != 0),
     "㉕ RSI5<15 + DVS>0 + 月曜除外":
         lambda df: (df["rsi5"] < 15) & (df["dvs"] > 0) & (_weekday(df) != 0),
+
+    # ─ 直近5日リターン（平均回帰） ─
+    "㉖ 直近5日-3%以下":
+        lambda df: df["return_5d"] < -3,
+    "㉗ 直近5日-5%以下":
+        lambda df: df["return_5d"] < -5,
+    "㉘ 直近5日-10%以下":
+        lambda df: df["return_5d"] < -10,
+
+    # ─ 価格帯フィルタ ─
+    "㉙ 低位株(〜500円)":
+        lambda df: df["Close"] <= 500,
+    "㉚ 中位株(500〜3000円)":
+        lambda df: (df["Close"] > 500) & (df["Close"] <= 3000),
+    "㉛ 高位株(3000円〜)":
+        lambda df: df["Close"] > 3000,
+
+    # ─ 曜日 × DVS/RSI5 複合 ─
+    "㉜ 水・木 + DVS>10":
+        lambda df: _weekday(df).isin([2, 3]) & (df["dvs"] > 10),
+    "㉝ 水・木 + RSI5<20":
+        lambda df: _weekday(df).isin([2, 3]) & (df["rsi5"] < 20),
+    "㉞ RSI5<10 + 水・木":
+        lambda df: (df["rsi5"] < 10) & _weekday(df).isin([2, 3]),
+
+    # ─ MA200乖離率（長期トレンド） ─
+    "㉟ MA200割れ(-5%以下)":
+        lambda df: df["ma200_diff_pct"] < -5,
+    "㊱ MA200割れ(-10%以下)":
+        lambda df: df["ma200_diff_pct"] < -10,
+    "㊲ MA200上方(+5%以上)":
+        lambda df: df["ma200_diff_pct"] > 5,
+
+    # ─ カレンダー効果 ─
+    "㊳ 月初め(1〜3営業日)":
+        lambda df: df["biz_rank_in_month"] <= 3,
+    "㊴ 月末除外(最終2営業日を除く)":
+        lambda df: df["biz_rank_from_end"] > 2,
+    "㊵ 月初め + DVS>0":
+        lambda df: (df["biz_rank_in_month"] <= 3) & (df["dvs"] > 0),
+
+    # ─ 直近下落 × 買いシグナル 複合 ─
+    "㊶ 直近5日-5% + DVS>0":
+        lambda df: (df["return_5d"] < -5) & (df["dvs"] > 0),
+    "㊷ 直近5日-5% + RSI5<20":
+        lambda df: (df["return_5d"] < -5) & (df["rsi5"] < 20),
+    "㊸ 直近5日-3% + 月曜除外":
+        lambda df: (df["return_5d"] < -3) & (_weekday(df) != 0),
+    "㊹ 直近5日-5% + 水・木":
+        lambda df: (df["return_5d"] < -5) & _weekday(df).isin([2, 3]),
+    "㊺ 直近5日-5% + DVS>0 + 月曜除外":
+        lambda df: (df["return_5d"] < -5) & (df["dvs"] > 0) & (_weekday(df) != 0),
 }
 
 
