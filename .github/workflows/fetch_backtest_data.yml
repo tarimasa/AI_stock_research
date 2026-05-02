@@ -3,8 +3,12 @@ name: Fetch Backtest Monthly Data
 on:
   workflow_dispatch:
     inputs:
-      month:
-        description: '対象月 (YYYYMM形式, 例: 202604)。省略時は前月。'
+      months:
+        description: |
+          取得する月を指定（YYYYMM形式）。
+            単月: 202604
+            範囲: 202105-202409
+          省略時は前月を自動取得。
         required: false
         default: ''
       force:
@@ -19,9 +23,9 @@ concurrency:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 120  # 複数月取得時のため余裕を持たせる
     permissions:
-      contents: write  # parquetファイルをコミット・プッシュするため
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -38,38 +42,48 @@ jobs:
 
       - name: Fetch monthly data from JQuants
         run: |
-          MONTH_ARG=""
+          MONTHS_ARG=""
           FORCE_ARG=""
-          if [ -n "${{ github.event.inputs.month }}" ]; then
-            MONTH_ARG="--month ${{ github.event.inputs.month }}"
+
+          INPUT="${{ github.event.inputs.months }}"
+          if [ -n "$INPUT" ]; then
+            # 単月(YYYYMM)か範囲(YYYYMM-YYYYMM)かで引数を切り替え
+            if [[ "$INPUT" == *"-"* ]]; then
+              MONTHS_ARG="--months $INPUT"
+            else
+              MONTHS_ARG="--month $INPUT"
+            fi
           fi
+
           if [ "${{ github.event.inputs.force }}" = "true" ]; then
             FORCE_ARG="--force"
           fi
-          python backtest/fetch_monthly_data.py $MONTH_ARG $FORCE_ARG
+
+          python backtest/fetch_monthly_data.py $MONTHS_ARG $FORCE_ARG
         env:
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
 
-      - name: Check for new parquet files
+      - name: Check for new/updated parquet files
         id: check_files
         run: |
           git status --short backtest/data/
           COUNT=$(git status --short backtest/data/ | grep '\.parquet' | wc -l)
           echo "changed=$COUNT" >> $GITHUB_OUTPUT
+          echo "変更ファイル数: $COUNT"
 
-      - name: Commit and push parquet file
+      - name: Commit and push parquet files
         if: steps.check_files.outputs.changed != '0'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # 対象月名をメッセージに含める
-          if [ -n "${{ github.event.inputs.month }}" ]; then
-            MONTH_LABEL="${{ github.event.inputs.month }}"
+          INPUT="${{ github.event.inputs.months }}"
+          if [ -n "$INPUT" ]; then
+            LABEL="$INPUT"
           else
-            MONTH_LABEL=$(date -d "$(date +%Y-%m-01) -1 day" +%Y%m)
+            LABEL=$(date -d "$(date +%Y-%m-01) -1 day" +%Y%m)
           fi
 
           git add backtest/data/daily_*.parquet
-          git commit -m "data: JQuants ${MONTH_LABEL} 月次OHLCVデータを追加"
+          git commit -m "data: JQuants ${LABEL} 月次OHLCVデータを追加"
           git push origin HEAD
