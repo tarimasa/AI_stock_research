@@ -52,42 +52,44 @@ class TestTickRound:
 # ──────────────────────────────────────────────────────────
 
 class TestCalcPriceCandidates:
-    def test_short_term_sl_is_3pct(self):
+    # price_calculator.py の最適化 (65747a6) で SL 3→5%、TP 2〜4→7.5〜10% に変更された。
+    # 以下のテストは現行値（SL 5% / TP 7.5-10%）に合わせている。
+    def test_short_term_sl_is_5pct(self):
         result = calc_price_candidates(1000.0, sma25=None, holding_days=3, vix=20.0)
         bn = result["buy_now"]
         sl_pct = (bn["buy_price"] - bn["stop_loss"]) / bn["buy_price"] * 100
-        assert abs(sl_pct - 3.0) < 0.5   # 3%前後（呼値丸めによる誤差許容）
+        assert abs(sl_pct - 5.0) < 0.5   # 5%前後（呼値丸めによる誤差許容）
 
     def test_short_term_sl_widens_with_high_vix(self):
         normal = calc_price_candidates(1000.0, sma25=None, holding_days=3, vix=20.0)
         high_vix = calc_price_candidates(1000.0, sma25=None, holding_days=3, vix=35.0)
-        # VIX30超では損切り4%
-        assert high_vix["buy_now"]["stop_loss_pct"] == 4.0
-        assert normal["buy_now"]["stop_loss_pct"] == 3.0
+        # VIX30超では損切り6%
+        assert high_vix["buy_now"]["stop_loss_pct"] == 6.0
+        assert normal["buy_now"]["stop_loss_pct"] == 5.0
 
-    def test_medium_term_sl_is_8pct(self):
+    def test_medium_term_sl_is_5pct(self):
         result = calc_price_candidates(2000.0, sma25=None, holding_days=7, vix=20.0)
-        assert result["buy_now"]["stop_loss_pct"] == 8.0
+        assert result["buy_now"]["stop_loss_pct"] == 5.0
 
     def test_medium_term_sl_widens_with_high_vix(self):
         result = calc_price_candidates(2000.0, sma25=None, holding_days=7, vix=35.0)
-        assert result["buy_now"]["stop_loss_pct"] == 10.0
+        assert result["buy_now"]["stop_loss_pct"] == 7.0
 
     def test_short_term_tp_range(self):
         result = calc_price_candidates(1000.0, sma25=None, holding_days=2, vix=15.0)
         bn = result["buy_now"]
         tp_low_pct = (bn["take_profit_low"] - bn["buy_price"]) / bn["buy_price"] * 100
         tp_high_pct = (bn["take_profit_high"] - bn["buy_price"]) / bn["buy_price"] * 100
-        assert 1.5 <= tp_low_pct <= 2.5   # 約2%
-        assert 3.5 <= tp_high_pct <= 4.5  # 約4%
+        assert 7.0 <= tp_low_pct <= 8.0     # 約7.5%
+        assert 9.5 <= tp_high_pct <= 10.5   # 約10%
 
     def test_medium_term_tp_range(self):
         result = calc_price_candidates(2000.0, sma25=None, holding_days=7, vix=15.0)
         bn = result["buy_now"]
         tp_low_pct = (bn["take_profit_low"] - bn["buy_price"]) / bn["buy_price"] * 100
         tp_high_pct = (bn["take_profit_high"] - bn["buy_price"]) / bn["buy_price"] * 100
-        assert 4.5 <= tp_low_pct <= 5.5   # 約5%
-        assert 7.5 <= tp_high_pct <= 8.5  # 約8%
+        assert 7.0 <= tp_low_pct <= 8.0     # 約7.5%
+        assert 9.5 <= tp_high_pct <= 10.5   # 約10%
 
     def test_buy_dip_uses_sma25_when_lower(self):
         """SMA25が現在値より2%以上低い場合はSMA25を押し目価格に使う"""
@@ -109,16 +111,15 @@ class TestCalcPriceCandidates:
         assert bd["buy_price"] == _tick_round(2000.0 * 0.97)
 
     def test_rr_ratio_short_term_is_adequate(self):
-        """短期: 利確上限(TP_high=4%)と損切り(SL=3%)の比率が1.0以上を確認。
-        LLMはTP_low〜TP_high範囲で選択するが、必要に応じて上限以上のTPを選べる。
-        validate_recommendation(RR≥1.5)はLLM出力に対して別途検証される。
+        """短期: TP_low=7.5% / SL=5% → RR=1.5 以上を確認。
+        validate_recommendation(RR≥1.5) との整合性を保つため TP_low で判定する。
         """
         result = calc_price_candidates(1000.0, sma25=None, holding_days=3, vix=20.0)
         bn = result["buy_now"]
-        reward_high = bn["take_profit_high"] - bn["buy_price"]
+        reward_low = bn["take_profit_low"] - bn["buy_price"]
         risk = bn["buy_price"] - bn["stop_loss"]
         assert risk > 0
-        assert reward_high / risk >= 1.0   # TP_high=4%, SL=3% → RR≈1.33
+        assert reward_low / risk >= 1.4   # TP_low=7.5%, SL=5% → RR=1.5（呼値丸めで微差許容）
 
 
 # ──────────────────────────────────────────────────────────
@@ -131,11 +132,15 @@ class TestCalcAllCandidates:
         assert "short_term" in result
         assert "medium_term" in result
 
-    def test_short_term_has_tighter_sl(self):
+    def test_short_and_medium_term_sl_sensible(self):
+        """短期・中期いずれの SL も 3〜10% の妥当な範囲内にあることを確認。
+        (旧実装では短期<中期だったが、最適化後は両方 5% の固定値となった)
+        """
         result = calc_all_candidates(2000.0, sma25=None, vix=20.0)
         st_sl = result["short_term"]["buy_now"]["stop_loss_pct"]
         mt_sl = result["medium_term"]["buy_now"]["stop_loss_pct"]
-        assert st_sl < mt_sl
+        assert 3.0 <= st_sl <= 10.0
+        assert 3.0 <= mt_sl <= 10.0
 
 
 # ──────────────────────────────────────────────────────────

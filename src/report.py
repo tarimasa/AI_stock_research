@@ -24,20 +24,228 @@ import data_fetcher
 import line_notifier
 import macro_preprocessor
 import news_fetcher
+import noon_screener
 import portfolio_tracker
 import price_calculator
 import screener
+import sector_filter
 import signal_tracker
+from master_manager import get_master
 
 # フルスキャンモード切り替えフラグ
 FULL_SCAN_ENABLED = os.environ.get("FULL_SCAN_ENABLED", "false").lower() == "true"
 # 移行期間中の並行比較フラグ
 SCAN_COMPARE = os.environ.get("SCAN_COMPARE", "false").lower() == "true"
+# セクター集中上限（推奨+保有合計、1セクターあたり）
+MAX_PER_SECTOR = int(os.environ.get("MAX_PER_SECTOR", 1))
 
 
 def _load_watchlist() -> dict:
     watchlist_path = Path(__file__).parent.parent / "config" / "watchlist.json"
     return json.loads(watchlist_path.read_text(encoding="utf-8"))
+
+
+def _build_name_lookup(enriched_stocks: list) -> dict:
+    """
+    4桁コード → 正式名称 の辞書を構築する（優先順位: enriched_stocks > master > watchlist）。
+    Claudeが返す name は LLM の幻覚で誤ることがあるため、この辞書で上書きする。
+    """
+    lookup: dict = {}
+
+    try:
+        watchlist = _load_watchlist()
+        for item in watchlist.get("stocks", []):
+            code4 = item.get("code", "").replace(".T", "")[:4]
+            name = item.get("name", "")
+            if code4 and name:
+                lookup[code4] = name
+    except Exception:
+        pass
+
+    try:
+        master = get_master()
+        for code4, info in master.items():
+            name = info.get("name", "")
+            if code4 and name:
+                lookup[code4] = name
+    except Exception:
+        pass
+
+    # enriched_stocks を最優先（フルスキャンで使われたその日の名称と一致させるため）
+    for s in enriched_stocks or []:
+        code4 = str(s.get("code", "")).replace(".T", "")[:4]
+        name = s.get("name", "") or ""
+        if code4 and name:
+            lookup[code4] = name
+
+    return lookup
+
+
+def _build_authoritative_name_lookup() -> dict:
+    """
+    enriched_stocks に依存しない権威ソース（watchlist + master）のみで lookup を構築する。
+    enriched_stocks の name が空のときに信頼できる引き元として使う。
+    """
+    lookup: dict = {}
+    try:
+        watchlist = _load_watchlist()
+        for item in watchlist.get("stocks", []):
+            code4 = item.get("code", "").replace(".T", "")[:4]
+            name = item.get("name", "")
+            if code4 and name:
+                lookup[code4] = name
+    except Exception:
+        pass
+
+    try:
+        master = get_master()
+        for code4, info in master.items():
+            name = info.get("name", "")
+            if code4 and name:
+                lookup[code4] = name
+    except Exception:
+        pass
+
+    return lookup
+
+
+def _fill_stock_names_from_lookup(stocks: list, lookup: dict) -> int:
+    """
+    stocks の各 dict について name が空なら lookup から充填する。
+    Returns: 充填件数。
+    """
+    if not stocks or not lookup:
+        return 0
+    filled = 0
+    for s in stocks:
+        if s.get("name"):
+            continue
+        raw_code = str(s.get("code", ""))
+        code4 = raw_code.replace(".T", "")[:4]
+        if not code4 or not code4.isdigit():
+            continue
+        name = lookup.get(code4)
+        if name:
+            s["name"] = name
+            filled += 1
+    return filled
+
+
+def _diagnose_missing_names(stocks: list, lookup: dict) -> None:
+    """
+    Stage1 候補のうち lookup にすら無いコードを警告ログ出力する。
+    マスターキャッシュが古い／J-Quants が当該銘柄を返していない可能性を可視化する。
+    """
+    missing = []
+    for s in stocks or []:
+        code4 = str(s.get("code", "")).replace(".T", "")[:4]
+        if not code4 or not code4.isdigit():
+            continue
+        if code4 not in lookup:
+            missing.append(code4)
+    if missing:
+        print(
+            f"[report] WARNING: 名前が引けない銘柄 {len(missing)}件: {missing[:10]}... "
+            f"master 強制更新を検討してください。lookup_size={len(lookup)}"
+        )
+
+
+def _fix_recommendation_names(analysis: dict, enriched_stocks: list) -> None:
+    """
+    Claudeが返した推奨・エグジット警告の銘柄名を権威ソースで上書きする。
+    あわせて enriched_stocks (=stage1_stocks) の空 name も lookup で充填する。
+
+    Claude は銘柄名を誤ることがある（特にマイナー銘柄や名前が長い銘柄）ため、
+    master_manager と watchlist を使って再引きする。
+    """
+    lookup = _build_name_lookup(enriched_stocks)
+    if not lookup:
+        return
+
+    # enriched_stocks の空 name を埋める（Stage1詳細表示用）
+    auth_lookup = _build_authoritative_name_lookup()
+    filled = _fill_stock_names_from_lookup(enriched_stocks, auth_lookup)
+    if filled:
+        print(f"[report] Stage1 銘柄名を lookup から充填: {filled}件")
+    _diagnose_missing_names(enriched_stocks, auth_lookup)
+    # lookup 自体も更新（enriched_stocks に充填された名前を反映）
+    lookup = _build_name_lookup(enriched_stocks)
+
+    def _fix_in_list(items: list, label: str) -> None:
+        for item in items or []:
+            raw_code = str(item.get("code", ""))
+            code4 = raw_code.replace(".T", "")[:4]
+            if not code4 or not code4.isdigit():
+                continue
+            authoritative = lookup.get(code4)
+            if not authoritative:
+                continue
+            original = item.get("name", "")
+            if original != authoritative:
+                if original:
+                    print(f"[report] {label} 銘柄名修正: {code4} '{original}' → '{authoritative}'")
+                item["name"] = authoritative
+
+    _fix_in_list(analysis.get("recommendations", []), "推奨")
+    _fix_in_list(analysis.get("all_recommendations", []), "推奨(全件)")
+    _fix_in_list(analysis.get("exit_alerts", []), "エグジット警告")
+
+
+def _apply_sector_concentration_filter(analysis: dict, portfolio_result: dict) -> None:
+    """
+    保有銘柄のセクター集中を加味して analysis['recommendations'] を絞り込む。
+    除外件数とセクター内訳を caution に追記し、ログに出力する。
+
+    保有データは portfolio_tracker.check_portfolio() の戻り値（holdings 含む）を渡す。
+    MAX_PER_SECTOR=1（既定）なら同一セクターは保有 + 推奨で 1 銘柄まで。
+    """
+    if not analysis.get("recommendations"):
+        return
+
+    try:
+        watchlist = _load_watchlist()
+    except Exception:
+        watchlist = {}
+
+    try:
+        master = get_master()
+    except Exception:
+        master = {}
+
+    held_counts = sector_filter.get_held_sector_counts(
+        portfolio_result, watchlist, master
+    )
+    if held_counts:
+        held_str = ", ".join(f"{s}×{n}" for s, n in held_counts.items())
+        print(f"[report] 保有セクター: {held_str}")
+
+    kept, removed = sector_filter.filter_by_sector_concentration(
+        analysis["recommendations"],
+        held_counts,
+        max_per_sector=MAX_PER_SECTOR,
+        watchlist=watchlist,
+        master=master,
+    )
+
+    if removed:
+        excluded_lines = [
+            f"{r.get('code', '')[:4]}({r.get('_excluded_sector', '?')})"
+            for r in removed
+        ]
+        notice = f"セクター集中で除外: {', '.join(excluded_lines)}"
+        print(f"[report] {notice} (max_per_sector={MAX_PER_SECTOR})")
+
+        existing = analysis.get("caution") or ""
+        analysis["caution"] = (
+            f"{existing} / {notice}".strip(" /") if existing else notice
+        )
+
+        # 除外された推奨も all_recommendations に保持（Stage1 詳細表示用）
+        for r in removed:
+            r["_invalid"] = True
+            r["_invalid_reason"] = f"セクター{r.get('_excluded_sector', '')}集中で除外"
+
+    analysis["recommendations"] = kept
 
 
 def run_report() -> None:
@@ -146,6 +354,9 @@ def run_report() -> None:
     print(f"[report] 市場状況: {analysis.get('market_condition')}")
     analysis["nikkei_trend"] = market_data.get("nikkei_trend", "")
 
+    # Step 5.1: 銘柄名を権威ソースで上書き（Claude の幻覚対策）
+    _fix_recommendation_names(analysis, enriched_stocks)
+
     # Step 5.5: シグナル記録・勝率更新
     print("[report] シグナル記録・勝率更新中...")
     try:
@@ -168,6 +379,9 @@ def run_report() -> None:
     print("[report] ポートフォリオ確認中...")
     portfolio_result = portfolio_tracker.check_portfolio()
 
+    # Step 6.1: セクター集中フィルタ（保有銘柄を考慮して推奨を絞る）
+    _apply_sector_concentration_filter(analysis, portfolio_result)
+
     # Step 7: LINE 送信
     print("[report] LINE 送信中...")
     line_notifier.send_daily_report(
@@ -175,6 +389,121 @@ def run_report() -> None:
         stage1_stocks=enriched_stocks if FULL_SCAN_ENABLED else None,
     )
     print("[report] 送信完了")
+
+
+def run_noon_report() -> None:
+    """
+    昼休み（11:30〜12:30 JST）中に実行する後場寄付向けレポート。
+
+    朝レポートとの違い:
+      - 朝: 前日終値ベースのスクリーニング → 9:00 寄付 IFDOCO 発注向け
+      - 昼: 前場（9:00〜11:30）の値動きを織り込んだ再スクリーニング → 12:30 後場寄付 IFDOCO 発注向け
+
+    処理フロー:
+      1. 市場データ取得（朝と同じ）
+      2. Stage1 スクリーニング（朝と同じ、日足ベース）
+      3. noon_screener.apply_noon_filter() で前場データを付与・再スコア
+      4. Claude 分析（朝と同じプロンプト、ただし current_price が前場引値に変わる）
+      5. LINE 送信（「後場寄付向け」ヘッダー付き）
+    """
+    print("=== AI株式リサーチBot 起動（昼・後場寄付向け）===")
+    print(f"[noon] モード: {'全銘柄スキャン' if FULL_SCAN_ENABLED else 'ウォッチリスト'}")
+
+    # Step 1: 市場データ取得
+    print("[noon] 市場データ取得中...")
+    market_data = data_fetcher.fetch_market_data()
+
+    # Step 1.5: マクロ前処理
+    try:
+        foreign = macro_preprocessor.get_foreign_investor_trend()
+        market_data["foreign_flag"] = foreign["flag"]
+    except Exception as e:
+        print(f"[noon] 海外投資家動向取得失敗（続行）: {e}")
+    macro_result = macro_preprocessor.preprocess_macro(market_data)
+    print(f"[noon] マクロ判定: {macro_result['condition']} / {macro_result['flags_text']}")
+
+    # Step 2: Stage1 スクリーニング（朝と同じ日足ベース）
+    scan_info = None
+    if FULL_SCAN_ENABLED:
+        stage1 = _run_fullscan_mode(market_data)
+        scan_info = f"J-Quants全銘柄スキャン+前場強化 → Stage1通過 {len(stage1)}件"
+    else:
+        stage1 = _run_watchlist_mode(market_data)
+
+    if not stage1:
+        print("[noon] Stage1 通過銘柄なし。")
+        empty_analysis = {
+            "market_condition": macro_result.get("condition", "注意"),
+            "market_comment": "前場スクリーニング通過銘柄がありませんでした。",
+            "recommendations": [],
+            "exit_alerts": [],
+            "caution": None,
+        }
+        line_notifier.send_daily_report(
+            empty_analysis, {"holdings": []},
+            scan_info=scan_info, session="noon",
+        )
+        return
+
+    # Step 3: 前場メトリクスを付与して昼特化再スコア
+    print("[noon] 前場メトリクス付与＆昼再スコア中...")
+    noon_candidates = noon_screener.apply_noon_filter(stage1)
+
+    if not noon_candidates:
+        print("[noon] 昼フィルタ通過銘柄なし。")
+        empty_analysis = {
+            "market_condition": macro_result.get("condition", "注意"),
+            "market_comment": "前場の値動きを踏まえた推奨候補がありませんでした。",
+            "recommendations": [],
+            "exit_alerts": [],
+            "caution": None,
+        }
+        line_notifier.send_daily_report(
+            empty_analysis, {"holdings": []},
+            scan_info=scan_info, session="noon",
+        )
+        return
+
+    # Step 4: 価格候補を再計算（前場引値ベース）
+    vix = macro_result.get("vix", 20.0)
+    for stock in noon_candidates:
+        current_price = stock.get("close") or stock.get("price") or 0
+        sma25 = stock.get("sma25")
+        if current_price > 0:
+            stock["price_candidates"] = price_calculator.calc_all_candidates(
+                current_price, sma25, vix=vix
+            )
+        # stage1_signals に noon_signals を追記（LINE 表示用）
+        existing = stock.get("stage1_signals", []) or []
+        stock["stage1_signals"] = existing + stock.get("noon_signals", [])
+
+    # Step 5: Claude 分析
+    print("[noon] Claude 分析中...")
+    market_news = []
+    try:
+        market_news = news_fetcher.fetch_market_news(hours=6, max_headlines=10)
+    except Exception:
+        pass
+    analysis = claude_analyzer.analyze(noon_candidates, market_data, market_news, macro_result)
+    analysis["nikkei_trend"] = market_data.get("nikkei_trend", "")
+
+    # Step 5.1: 銘柄名を権威ソースで上書き
+    _fix_recommendation_names(analysis, noon_candidates)
+
+    # Step 6: ポートフォリオ確認
+    portfolio_result = portfolio_tracker.check_portfolio()
+
+    # Step 6.1: セクター集中フィルタ
+    _apply_sector_concentration_filter(analysis, portfolio_result)
+
+    # Step 7: LINE 送信
+    line_notifier.send_daily_report(
+        analysis, portfolio_result,
+        scan_info=scan_info,
+        stage1_stocks=noon_candidates if FULL_SCAN_ENABLED else None,
+        session="noon",
+    )
+    print("[noon] 送信完了")
 
 
 def _run_watchlist_mode(market_data: dict) -> list:

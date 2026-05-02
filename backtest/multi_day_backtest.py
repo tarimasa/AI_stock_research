@@ -212,23 +212,37 @@ def compute_outcomes(
     tp_pct: float,
     sl_pct: float,
     max_days: int,
+    holding_mode: str = "overnight",
+    cost_pct: float = ROUND_TRIP_COST_PCT,
 ) -> pd.Series:
     """
     各シグナル行のリターンを計算して返す（ベクトル化）。
 
     ロジック:
       エントリー = 翌日始値（n1_open）
-      max_days日以内にTP/SLに到達したら決済、到達しなければmax_days日目の終値で決済。
+      max_days日以内にTP/SLに到達したら決済、到達しなければmax_days日目で決済。
       同日にTPとSLの両方ヒット → SL優先（保守的）。
       逆順パスにより、最も早い決済日が自動的に確定する。
+
+    holding_mode:
+      "overnight": TP/SL未到達時は max_days 日目の終値で決済
+      "half_day":  TP/SL未到達時は max_days 日目の (始値+終値)/2 で決済（後場寄付近似）
+
+    cost_pct: 往復取引コスト%。結果から減算する。
     """
     entry    = df["n1_open"]
     tp_price = entry * (1 + tp_pct / 100)
     sl_price = entry * (1 + sl_pct / 100)
 
-    # デフォルト: max_days日目の終値で決済
+    # TP/SL 未到達時のデフォルト決済価格
     last_close_col = f"n{max_days}_close"
-    result = ((df[last_close_col] - entry) / entry * 100).copy()
+    if holding_mode == "half_day":
+        last_open_col = f"n{max_days}_open"
+        default_exit = (df[last_open_col] + df[last_close_col]) / 2.0
+    else:
+        default_exit = df[last_close_col]
+
+    result = ((default_exit - entry) / entry * 100).copy()
 
     # 逆順パス: 早い日ほど後から上書きされ最終的に残る（最早決済が勝つ）
     for day in range(max_days, 0, -1):
@@ -243,7 +257,8 @@ def compute_outcomes(
         # SL上書き（同日両ヒット時もSL優先）
         result = result.where(~sl_hit, other=sl_pct)
 
-    return result
+    # 取引コストを減算（現実的 EV）
+    return result - cost_pct
 
 
 # ── 統計量計算 ────────────────────────────────────────────────────────────────

@@ -496,6 +496,8 @@ def calc_trade_outcomes(
     df: pd.DataFrame,
     sl_pct: float = SL_PCT,
     tp_pct: float = TP_PCT,
+    holding_mode: str = None,
+    cost_pct: float = None,
 ) -> pd.DataFrame:
     """
     各(Code, Date)シグナルの翌営業日トレード結果を計算する。
@@ -504,11 +506,24 @@ def calc_trade_outcomes(
     イグジット（優先順位）:
       1. High が TP価格以上 かつ Low が SL価格より高い → TP達成 (+tp_pct%)
       2. Low が SL価格以下 → SL発動 (sl_pct%)   ← 両方ヒット時もSL優先（保守的）
-      3. それ以外 → 翌日終値で決済（EOD return）
+      3. それ以外 → 翌日の決済価格（holding_mode による）
+
+    holding_mode:
+      "overnight" (既定): TP/SL未到達時は翌日終値で決済 → 1日保有
+      "half_day":         TP/SL未到達時は (翌日始値+翌日終値)/2 で決済 → 半日保有近似
+                          （発注窓: 朝9:00寄付 → 12:30後場寄付で手仕舞い）
+
+    cost_pct: 往復取引コスト（%）。None の場合はモジュール定数を使う。
+              リターンからこの値を減算する（現実的 EV 算出）。
 
     金曜日→月曜日の翌営業日対応はDataFrameのソート順（JQuantsは営業日のみ）で自動処理。
     """
-    print("[backtest] トレード結果計算中...")
+    if holding_mode is None:
+        holding_mode = HOLDING_MODE
+    if cost_pct is None:
+        cost_pct = ROUND_TRIP_COST_PCT
+
+    print(f"[backtest] トレード結果計算中 (mode={holding_mode}, cost={cost_pct:.2f}%)...")
     df = df.sort_values(["Code", "Date"]).copy()
     g = df.groupby("Code", group_keys=False)
 
@@ -531,17 +546,29 @@ def calc_trade_outcomes(
     outcome[sl_hit]            = "sl"  # sl_hit & tp_hit も含む
     df["outcome"] = outcome
 
+    # イグジット価格（TP/SL未到達時）
+    if holding_mode == "half_day":
+        # 後場寄付 ≒ (翌日始値+翌日終値)/2 で近似（日足データの限界）
+        neutral_exit_price = (df["next_open"] + df["next_close"]) / 2.0
+    else:
+        neutral_exit_price = df["next_close"]
+
     # リターン計算
-    eod_return = ((df["next_close"] - entry) / entry * 100).round(3)
-    return_pct = eod_return.copy()
-    return_pct[tp_hit & ~sl_hit] = tp_pct
-    return_pct[sl_hit]            = sl_pct
-    df["return_pct"] = return_pct
+    neutral_return = ((neutral_exit_price - entry) / entry * 100).round(3)
+    return_pct_gross = neutral_return.copy()
+    return_pct_gross[tp_hit & ~sl_hit] = tp_pct
+    return_pct_gross[sl_hit]            = sl_pct
 
-    # 始値からの終値リターン（補助情報）
-    df["eod_return_pct"] = eod_return
+    # 取引コストを減算（現実的な手取り EV）
+    return_pct_net = return_pct_gross - cost_pct
 
-    print(f"[backtest] トレード結果計算完了")
+    df["return_pct_gross"] = return_pct_gross.round(3)
+    df["return_pct"]       = return_pct_net.round(3)
+    df["cost_pct"]         = cost_pct
+    df["eod_return_pct"]   = ((df["next_close"] - entry) / entry * 100).round(3)
+    df["holding_mode"]     = holding_mode
+
+    print(f"[backtest] トレード結果計算完了 (rows={len(df)})")
     return df
 
 
@@ -687,6 +714,9 @@ def generate_report(
     print(f"  学習期間: {TRAIN_START} 〜 {TRAIN_END}")
     print(f"  検証期間: {VAL_START} 〜 {VAL_END}")
     print(f"  損切ライン: {SL_PCT}%  利確ライン: +{TP_PCT}%")
+    holding_mode = df["holding_mode"].iloc[0] if "holding_mode" in df.columns and len(df) else HOLDING_MODE
+    cost_pct = df["cost_pct"].iloc[0] if "cost_pct" in df.columns and len(df) else ROUND_TRIP_COST_PCT
+    print(f"  保有モード: {holding_mode}   往復コスト: {cost_pct:.2f}%（EVから減算済）")
     print("=" * 70)
 
     overall_train = analysis_train.get("overall", {})
@@ -856,7 +886,8 @@ def generate_report(
         "rsi5", "rsi14", "sma25", "ma25_diff_pct",
         "vol_ratio", "breakout_5d", "w52_pos", "dvs", "stage1_score",
         "next_date", "next_open", "next_high", "next_low", "next_close",
-        "outcome", "return_pct", "eod_return_pct",
+        "outcome", "return_pct", "return_pct_gross", "cost_pct",
+        "eod_return_pct", "holding_mode",
     ]
     save_cols = [c for c in save_cols if c in df_train_pass.columns]
     df_train_pass[save_cols].to_csv(results_path, index=False, encoding="utf-8-sig")
@@ -915,8 +946,10 @@ def run_backtest(apply_filter: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]
     # シグナル計算
     df_signals = calc_all_signals(df_full)
 
-    # トレード結果計算
-    df_results = calc_trade_outcomes(df_signals)
+    # トレード結果計算（手数料・保有モードを指定可能）
+    df_results = calc_trade_outcomes(
+        df_signals, holding_mode=holding_mode, cost_pct=cost_pct
+    )
 
     # 学習期間に絞り込み
     df_train = df_results[
@@ -949,6 +982,18 @@ def main():
     parser.add_argument("--force",     action="store_true", help="既存データを上書き")
     parser.add_argument("--analyze",   action="store_true", help="バックテスト実行")
     parser.add_argument("--no-filter", action="store_true", help="銘柄フィルタを無効化")
+    parser.add_argument(
+        "--holding-mode",
+        choices=["overnight", "half_day"],
+        default=HOLDING_MODE,
+        help="保有モード: overnight(1日, 既定) / half_day(後場寄付手仕舞い近似)",
+    )
+    parser.add_argument(
+        "--cost-pct",
+        type=float,
+        default=None,
+        help=f"往復取引コスト%%（既定: {ROUND_TRIP_COST_PCT:.2f}%% = 手数料{COMMISSION_PCT_ONEWAY}%%+スリッページ{SLIPPAGE_PCT_ONEWAY}%%×往復）",
+    )
     args = parser.parse_args()
 
     # デフォルト: 両方実行

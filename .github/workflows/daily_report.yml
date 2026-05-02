@@ -3,13 +3,22 @@ name: Daily Stock AI Report
 on:
   schedule:
     # GitHub Actions はスケジュール通りに起動する保証がなく、混雑時に30分〜2時間遅延することがある。
-    # 8:30〜8:45 頃にLINEを受け取るため、遅延を考慮して 06:30 JST (21:30 UTC) に前倒し設定。
-    - cron: '30 21 * * 0-4'   # 06:30 JST（目標: 8:30前後着信）※日〜木 = 月〜金
-    - cron: '0 2 * * 1-5'    # 11:00 JST（12:00 発注向け）※月〜金
+    # ユーザーの発注可能窓: 7:00〜9:00 JST（朝）と 12:00〜13:00 JST（昼）の2回。
+    - cron: '30 21 * * 0-4'   # 06:30 JST / 朝:9:00 前場寄付向け（目標着信 7:00〜8:30）
+    - cron: '45 2 * * 1-5'    # 11:45 JST / 昼:12:30 後場寄付向け（目標着信 12:00〜12:30、前場引け後）
   workflow_dispatch:           # 手動実行も可能
+    inputs:
+      session:
+        description: 'Session (morning or noon)'
+        required: false
+        default: 'morning'
+        type: choice
+        options:
+          - morning
+          - noon
 
 concurrency:
-  group: daily-stock-report
+  group: daily-stock-report-${{ github.event.schedule || inputs.session || 'default' }}
   cancel-in-progress: false
 
 jobs:
@@ -147,8 +156,22 @@ jobs:
         env:
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
 
-      - name: Run AI stock report
-        run: python src/main.py
+      # ── セッション決定 ────────────────────────────────────────────
+      # cron で起動された場合: schedule 式から morning / noon を判定
+      # 手動実行: inputs.session（既定 morning）
+      - name: Resolve session
+        id: session
+        run: |
+          if [ "${{ github.event.schedule }}" = "45 2 * * 1-5" ]; then
+            echo "value=noon" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ inputs.session }}" ]; then
+            echo "value=${{ inputs.session }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=morning" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run AI stock report (${{ steps.session.outputs.value }})
+        run: python src/main.py ${{ steps.session.outputs.value }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
@@ -157,7 +180,8 @@ jobs:
           LIFF_URL: ${{ secrets.LIFF_URL }}
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
           DRY_RUN: 'false'
-          MAX_STOCKS_TO_ANALYZE: '10'
+          SESSION: ${{ steps.session.outputs.value }}
+          MAX_STOCKS_TO_ANALYZE: '20'
           # フルスキャンモード: GitHub Variables で FULL_SCAN_ENABLED=true に設定して有効化
           FULL_SCAN_ENABLED: ${{ vars.FULL_SCAN_ENABLED || 'false' }}
           # 移行期間中の並行比較: SCAN_COMPARE=true で差分ログを出力

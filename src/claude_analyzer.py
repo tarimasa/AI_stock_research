@@ -30,8 +30,15 @@ load_dotenv()
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 MODEL = "claude-haiku-4-5-20251001"
 MAX_RETRIES = 3
-# タイムアウトを 180 秒に延長（全銘柄スキャン版はプロンプトが大きい）
-_TIMEOUT = httpx.Timeout(180.0, connect=10.0)
+# Stage1 通過候補の Stage2 投入上限。screener.MAX_STOCKS と同期させる。
+# 機会損失抑制のため 10 → 20 に拡張（PR #20 設計判断、20 件運用で品質と速度の両立）。
+_MAX_CANDIDATES = int(os.environ.get("MAX_STOCKS_TO_ANALYZE", 20))
+# タイムアウトを 240 秒に延長（候補 20 件で平均 15-30 秒、外れ値考慮）
+_TIMEOUT = httpx.Timeout(240.0, connect=10.0)
+# 短期投資の運用判断には再現性が重要なので temperature=0 で確定的応答にする。
+# 同一プロンプトに対して毎回同じ推奨が返るようになる（ユーザー報告 #20 対応）。
+# 環境変数 CLAUDE_TEMPERATURE で上書き可能（探索用に 0.3 などにも設定可能）。
+_TEMPERATURE = float(os.environ.get("CLAUDE_TEMPERATURE", 0.0))
 
 # ── システムプロンプト（圧縮版 ≤800 トークン） ────────────────────────────
 SYSTEM_PROMPT = """\
@@ -264,6 +271,7 @@ def analyze(
             message = client.messages.create(
                 model=MODEL,
                 max_tokens=4096,
+                temperature=_TEMPERATURE,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_prompt}],
             )
@@ -281,7 +289,8 @@ def analyze(
 # ── analyze_with_claude_safe（4-3a: トークン計測付き安全版）────────────────
 
 # Stage 2 入力トークン上限（超えたら候補を自動削減）
-_MAX_INPUT_TOKENS = 3000
+# 候補 20 件想定で 5000 トークンまで許容（システム+ユーザー合計）
+_MAX_INPUT_TOKENS = 5000
 _MIN_CANDIDATES = 5
 
 
@@ -322,7 +331,9 @@ def _build_fullscan_prompt(
     for s in candidates:
         code = s.get("code", "")
         info_m = master.get(code, {})
-        name = info_m.get("name", s.get("name", ""))[:6]
+        # 名前は切り詰めずフルで渡す（[:6]切り詰めはClaudeの幻覚の原因となるため撤廃）。
+        # Claudeが返した name は後段で master を使って上書き（report._fix_recommendation_names）。
+        name = info_m.get("name", s.get("name", ""))
         sector = info_m.get("sector33", s.get("sector", ""))[:4]
         earn = upcoming_earnings.get(code, {})
         earn_str = str(earn.get("days_until", "-")) if earn else "-"
@@ -382,7 +393,7 @@ def analyze_with_claude_safe(
         timeout=_TIMEOUT,
     )
 
-    current_candidates = list(candidates[:10])
+    current_candidates = list(candidates[:_MAX_CANDIDATES])
 
     # トークン数が収まるまで候補を2件ずつ削減
     while len(current_candidates) >= _MIN_CANDIDATES:
@@ -407,6 +418,7 @@ def analyze_with_claude_safe(
             message = client.messages.create(
                 model=MODEL,
                 max_tokens=4096,
+                temperature=_TEMPERATURE,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user}],
             )
@@ -452,7 +464,7 @@ def analyze_with_claude_cached(
     )
 
     user = _build_fullscan_prompt(
-        candidates[:10], macro_result, master, upcoming_earnings
+        candidates[:_MAX_CANDIDATES], macro_result, master, upcoming_earnings
     )
 
     for attempt in range(MAX_RETRIES):
@@ -460,6 +472,7 @@ def analyze_with_claude_cached(
             message = client.messages.create(
                 model=MODEL,
                 max_tokens=4096,
+                temperature=_TEMPERATURE,
                 system=[
                     {
                         "type": "text",
