@@ -766,7 +766,7 @@ def _calc_technicals_individual(
             info_m = master.get(code4, {})
             return {
                 "code": code4,
-                "name": info_m.get("name", ""),
+                "name": info_m.get("name") or code4,
                 "sector": info_m.get("sector33", ""),
                 "close": pc["close"],
                 "volume": pc["volume"],
@@ -816,7 +816,7 @@ def _calc_technicals_for_fullscan(
             info_m = master.get(code4, {})
             results.append({
                 "code": code4,
-                "name": info_m.get("name", ""),
+                "name": info_m.get("name") or code4,
                 "sector": info_m.get("sector33", ""),
                 "close": float(row.get("close", 0) or 0),
                 "volume": float(row.get("volume", 0) or 0),
@@ -991,18 +991,122 @@ def _log_stage1_distribution(scores: list[float], threshold: float) -> None:
 def _apply_stage1_filters(stocks: list[dict]) -> list[dict]:
     """
     テクニカル条件でフィルタし stage1_score と stage1_signals を付与する。
-    STAGE1_MIN_SCORE 以上の銘柄のみ通過（既定 60、環境変数で調整可能）。
+    スコア > 0 の銘柄のみ通過。
 
-    旧仕様（score > 0）は単一の弱いシグナルでも通過してしまい、
-    通過数が 500+ になることがあった。明確な複合シグナル or 強い単一シグナルのみ
-    通過させることで、トップ N の選定品質を確保する。
-
-    実装は _calc_stage1_score に委譲し、ここでは閾値判定とコピー付与のみ行う。
+    【閾値根拠 — 5年バックテスト（設計2021/05〜2025/09 / 検証2025/10〜2026/04）】
+    採用条件: 設計安定性 >= 50% かつ 検証EV > 0
+    - RSI5<20: 検証EV+0.573% → 維持
+    - RSI5<10: 検証EV+0.937% → 維持
+    - RSI5<20 + vol>=1.5x: 検証EV+0.934%, 安定55% → ボーナス+50pt
+    - 水木 + RSI5<20: 検証EV+0.867%, 安定97% → 新規追加
+    - 月曜エントリー: 検証EV低下 → ペナルティ-40pt
+    - DVS > 10: 検証EV+0.235% → 維持
+    - RSI5<30: 根拠なし → 削除
+    - 52週安値圏: 検証EV-0.160% 過学習確定 → 削除
     """
+    import datetime as _dt
+    today_weekday = _dt.date.today().weekday()  # 0=月, 1=火, 2=水, 3=木, 4=金
+
     passed = []
     for s in stocks:
-        score, signals = _calc_stage1_score(s)
-        if score < STAGE1_MIN_SCORE:
+        score = 0.0
+        signals: list[str] = []
+
+        breakout = bool(s.get("breakout_5d", False))
+        dvs = float(s.get("dvs", 0) or 0)
+        rsi5 = float(s.get("rsi5", 50) or 50)
+        rsi14 = float(s.get("rsi14", 50) or 50)
+        vol_ratio = float(s.get("vol_ratio", 1) or 1)
+        close_val = float(s.get("close", 0) or 0)
+        sma25_val = float(s.get("sma25", 0) or 0)
+
+        # ── 短期複合シグナル（最重要） ──────────────────────────────────────────
+        if breakout and dvs > 0 and rsi5 <= 20:
+            score += 120
+            signals.append("breakout+dvs正+rsi5<20(最優秀)")
+        elif breakout and dvs > 0:
+            score += 50
+            signals.append("breakout+dvs正")
+        elif breakout:
+            score += 20
+            signals.append("breakout")
+
+        # ── 方向性出来高（DVS） ─────────────────────────────────────────────────
+        # DVS>10 が最小有効閾値（検証EV+0.235%）
+        if dvs > 20:
+            score += 30
+            signals.append(f"DVS={dvs:.0f}(強い買い越し)")
+        elif dvs > 10:
+            score += 20
+            signals.append(f"DVS={dvs:.0f}(買い越し)")
+        elif dvs > 0:
+            score += 10
+            signals.append(f"DVS={dvs:.0f}(弱い買い越し)")
+
+        # ── 出来高急増 ──────────────────────────────────────────────────────────
+        if vol_ratio >= 2.0:
+            score += 40
+            signals.append(f"出来高{vol_ratio:.1f}倍")
+        elif vol_ratio >= 1.5:
+            score += 20
+            signals.append(f"出来高{vol_ratio:.1f}倍")
+        elif vol_ratio >= 1.3:
+            score += 10
+            signals.append(f"出来高{vol_ratio:.1f}倍")
+
+        # ── RSI14 売られすぎ ────────────────────────────────────────────────────
+        if rsi14 <= 25:
+            score += 25
+            signals.append(f"RSI14={rsi14:.0f}")
+        elif rsi14 <= 35:
+            score += 15
+            signals.append(f"RSI14={rsi14:.0f}")
+        elif rsi14 <= 40:
+            score += 8
+            signals.append(f"RSI14={rsi14:.0f}")
+
+        # ── RSI5 売られすぎ ─────────────────────────────────────────────────────
+        # RSI5<10: 検証EV+0.937%（安定67%）
+        # RSI5<20: 検証EV+0.573%（安定54%）
+        # RSI5<30 以上: 検証根拠なし → 削除
+        if rsi5 <= 10:
+            score += 60
+            signals.append(f"RSI5={rsi5:.0f}(極端売られすぎ)")
+        elif rsi5 <= 20:
+            score += 40
+            signals.append(f"RSI5={rsi5:.0f}(超売られすぎ)")
+
+        # ── RSI5<20 + 出来高1.5倍 複合シグナル ─────────────────────────────────
+        # 5年設計EV+0.446% → 検証EV+0.934%（安定55%）— 最強単体シグナル
+        if rsi5 <= 20 and vol_ratio >= 1.5:
+            score += 50
+            signals.append("RSI5<20+出来高急増(複合最優秀)")
+
+        # ── 水・木 + RSI5<20 ────────────────────────────────────────────────────
+        # 設計安定性97%（全パラメータ組み合わせでほぼ確実にプラス）、検証EV+0.867%
+        if today_weekday in (2, 3) and rsi5 <= 20:
+            score += 50
+            signals.append(f"{'水' if today_weekday == 2 else '木'}曜+RSI5<20(高確度)")
+
+        # ── 月曜ペナルティ ──────────────────────────────────────────────────────
+        # 月曜エントリーは検証EV低下（バックテスト: 月曜除外で+0.244%改善）
+        if today_weekday == 0:
+            score -= 40
+            signals.append("月曜エントリー(減点)")
+
+        # ── SMA25押し目 ─────────────────────────────────────────────────────────
+        if sma25_val > 0 and close_val > 0:
+            sma25_diff = (close_val - sma25_val) / sma25_val * 100
+            if -8 <= sma25_diff <= -2:
+                score += 15
+                signals.append(f"SMA25比{sma25_diff:.1f}%押し目")
+
+        # ── 弱気シグナルは除外 ──────────────────────────────────────────────────
+        if dvs <= -10:
+            score -= 200
+            signals.append("dvs負(除外)")
+
+        if score <= 0:
             continue
         s_copy = s.copy()
         s_copy["stage1_score"] = score

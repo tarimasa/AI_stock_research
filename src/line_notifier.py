@@ -270,6 +270,12 @@ def build_stage1_detail_text(stage1_stocks: list, analysis: dict) -> str:
 
         rec = recs_by_code.get(code4) or recs_by_code.get(raw_code.replace(".T", ""))
 
+        # 銘柄名: screenerのmaster→Claudeの推奨→コードの順で取得
+        stock_name = stock.get("name", "")
+        rec_name = rec.get("name", "") if rec else ""
+        name = (stock_name if (stock_name and stock_name != code4)
+                else (rec_name if rec_name else code4))
+
         if rec is None:
             emoji = "🔘"
             detail = "分析対象外"
