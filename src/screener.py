@@ -824,7 +824,21 @@ def _apply_stage1_filters(stocks: list[dict]) -> list[dict]:
     """
     テクニカル条件でフィルタし stage1_score と stage1_signals を付与する。
     スコア > 0 の銘柄のみ通過。
+
+    【閾値根拠 — 5年バックテスト（設計2021/05〜2025/09 / 検証2025/10〜2026/04）】
+    採用条件: 設計安定性 >= 50% かつ 検証EV > 0
+    - RSI5<20: 検証EV+0.573% ✅ → 維持
+    - RSI5<10: 検証EV+0.937% ✅ → 維持
+    - RSI5<20 + vol≥1.5倍: 検証EV+0.934%, 安定55% ✅ → ボーナス増加
+    - 水・木 + RSI5<20: 検証EV+0.867%, 安定97% ✅ → 新規追加（最強）
+    - 月曜エントリー: 検証EV-相当 ✅ → ペナルティ追加
+    - DVS > 10: 検証EV+0.235% ✅ → 維持
+    - RSI5<30: 根拠なし → 削除
+    - 52週安値圏: 検証EV-0.160% ❌ 過学習確定 → 削除
     """
+    import datetime as _dt
+    today_weekday = _dt.date.today().weekday()  # 0=月, 1=火, 2=水, 3=木, 4=金
+
     passed = []
 
     for s in stocks:
@@ -836,26 +850,22 @@ def _apply_stage1_filters(stocks: list[dict]) -> list[dict]:
         rsi5 = float(s.get("rsi5", 50) or 50)
         rsi14 = float(s.get("rsi14", 50) or 50)
         vol_ratio = float(s.get("vol_ratio", 1) or 1)
-        w52_pos = float(s.get("w52_pos", 50) or 50)
         close_val = float(s.get("close", 0) or 0)
         sma25_val = float(s.get("sma25", 0) or 0)
 
-        # 短期シグナル（最重要）
+        # ── 短期複合シグナル（最重要） ──────────────────────────────────────────
         if breakout and dvs > 0 and rsi5 <= 20:
             score += 120
             signals.append("breakout+dvs正+rsi5<20(最優秀)")
-        elif breakout and dvs > 0 and rsi5 <= 30:
-            score += 80
-            signals.append("breakout+dvs正+rsi5低")
         elif breakout and dvs > 0:
             score += 50
             signals.append("breakout+dvs正")
         elif breakout:
-            # DVSが正でなくてもブレイクアウト単独で加点（下落相場での押し目反発を拾う）
             score += 20
             signals.append("breakout")
 
-        # 方向性出来高（DVS単独での加点: バックテストでDVS>20がEV+0.506%）
+        # ── 方向性出来高（DVS） ─────────────────────────────────────────────────
+        # DVS>10 が最小有効閾値（検証EV+0.235%）
         if dvs > 20:
             score += 30
             signals.append(f"DVS={dvs:.0f}(強い買い越し)")
@@ -866,7 +876,7 @@ def _apply_stage1_filters(stocks: list[dict]) -> list[dict]:
             score += 10
             signals.append(f"DVS={dvs:.0f}(弱い買い越し)")
 
-        # 出来高急増（1.3倍まで緩和）
+        # ── 出来高急増 ──────────────────────────────────────────────────────────
         if vol_ratio >= 2.0:
             score += 40
             signals.append(f"出来高{vol_ratio:.1f}倍")
@@ -877,15 +887,7 @@ def _apply_stage1_filters(stocks: list[dict]) -> list[dict]:
             score += 10
             signals.append(f"出来高{vol_ratio:.1f}倍")
 
-        # 52週安値圏（40%まで緩和）
-        if w52_pos <= 20:
-            score += 30
-            signals.append(f"52w安値圏{w52_pos:.0f}%")
-        elif w52_pos <= 40:
-            score += 15
-            signals.append(f"52w安値圏{w52_pos:.0f}%")
-
-        # RSI売られすぎ（40まで緩和）
+        # ── RSI14 売られすぎ ────────────────────────────────────────────────────
         if rsi14 <= 25:
             score += 25
             signals.append(f"RSI14={rsi14:.0f}")
@@ -896,30 +898,43 @@ def _apply_stage1_filters(stocks: list[dict]) -> list[dict]:
             score += 8
             signals.append(f"RSI14={rsi14:.0f}")
 
-        # RSI5 売られすぎ（バックテスト最優秀シグナル: RSI5<20+出来高1.5倍 EV+0.708%）
+        # ── RSI5 売られすぎ ─────────────────────────────────────────────────────
+        # RSI5<10: 検証EV+0.937%（安定67%）
+        # RSI5<20: 検証EV+0.573%（安定54%）
+        # RSI5<30 以上: 検証根拠なし → 削除
         if rsi5 <= 10:
             score += 60
             signals.append(f"RSI5={rsi5:.0f}(極端売られすぎ)")
         elif rsi5 <= 20:
             score += 40
             signals.append(f"RSI5={rsi5:.0f}(超売られすぎ)")
-        elif rsi5 <= 30:
-            score += 15
-            signals.append(f"RSI5={rsi5:.0f}(売られすぎ)")
 
-        # RSI5<20 + 出来高1.5倍 = バックテスト最高EV複合シグナル
+        # ── RSI5<20 + 出来高1.5倍 複合シグナル ─────────────────────────────────
+        # 5年設計EV+0.446% → 検証EV+0.934%（安定55%）— 最強単体シグナル
         if rsi5 <= 20 and vol_ratio >= 1.5:
-            score += 30
+            score += 50
             signals.append("RSI5<20+出来高急増(複合最優秀)")
 
-        # SMA25押し目（下落相場でも拾える）
+        # ── 水・木 + RSI5<20 ────────────────────────────────────────────────────
+        # 設計安定性97%（全パラメータ組み合わせでほぼ確実にプラス）、検証EV+0.867%
+        if today_weekday in (2, 3) and rsi5 <= 20:
+            score += 50
+            signals.append(f"{'水' if today_weekday == 2 else '木'}曜+RSI5<20(高確度)")
+
+        # ── 月曜ペナルティ ──────────────────────────────────────────────────────
+        # 月曜エントリーは検証EV低下（バックテスト: 月曜除外で+0.244%改善）
+        if today_weekday == 0:
+            score -= 40
+            signals.append("月曜エントリー(減点)")
+
+        # ── SMA25押し目 ─────────────────────────────────────────────────────────
         if sma25_val > 0 and close_val > 0:
             sma25_diff = (close_val - sma25_val) / sma25_val * 100
             if -8 <= sma25_diff <= -2:
                 score += 15
                 signals.append(f"SMA25比{sma25_diff:.1f}%押し目")
 
-        # 弱気シグナルはペナルティ（事実上除外）
+        # ── 弱気シグナルは除外 ──────────────────────────────────────────────────
         if dvs <= -10:
             score -= 200
             signals.append("dvs負(除外)")
