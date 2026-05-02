@@ -1,0 +1,75 @@
+name: Fetch Backtest Monthly Data
+
+on:
+  workflow_dispatch:
+    inputs:
+      month:
+        description: '対象月 (YYYYMM形式, 例: 202604)。省略時は前月。'
+        required: false
+        default: ''
+      force:
+        description: '既存ファイルを上書きする (true/false)'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: fetch-backtest-data
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write  # parquetファイルをコミット・プッシュするため
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch monthly data from JQuants
+        run: |
+          MONTH_ARG=""
+          FORCE_ARG=""
+          if [ -n "${{ github.event.inputs.month }}" ]; then
+            MONTH_ARG="--month ${{ github.event.inputs.month }}"
+          fi
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            FORCE_ARG="--force"
+          fi
+          python backtest/fetch_monthly_data.py $MONTH_ARG $FORCE_ARG
+        env:
+          JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
+
+      - name: Check for new parquet files
+        id: check_files
+        run: |
+          git status --short backtest/data/
+          COUNT=$(git status --short backtest/data/ | grep '\.parquet' | wc -l)
+          echo "changed=$COUNT" >> $GITHUB_OUTPUT
+
+      - name: Commit and push parquet file
+        if: steps.check_files.outputs.changed != '0'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # 対象月名をメッセージに含める
+          if [ -n "${{ github.event.inputs.month }}" ]; then
+            MONTH_LABEL="${{ github.event.inputs.month }}"
+          else
+            MONTH_LABEL=$(date -d "$(date +%Y-%m-01) -1 day" +%Y%m)
+          fi
+
+          git add backtest/data/daily_*.parquet
+          git commit -m "data: JQuants ${MONTH_LABEL} 月次OHLCVデータを追加"
+          git push origin HEAD
