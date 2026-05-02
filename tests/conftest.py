@@ -16,6 +16,13 @@ os.environ.setdefault("DRY_RUN", "true")
 _OPTIONAL_MODULES = {
     "feedparser": {"parse": lambda url: types.SimpleNamespace(entries=[])},
     "pandas_ta": {},
+    "yfinance": {},
+    "jquantsapi": {},
+    "azure.storage.blob": {},
+    "azure": {},
+    "linebot": {},
+    "linebot.v3": {},
+    "linebot.v3.messaging": {},
 }
 
 for mod_name, attrs in _OPTIONAL_MODULES.items():

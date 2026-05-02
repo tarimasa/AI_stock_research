@@ -834,14 +834,21 @@ def _calc_technicals_for_fullscan(
         return _calc_technicals_individual(filtered_df, master)
 
 
-def _calc_stage1_score(stock: dict) -> tuple[float, list[str]]:
+def _calc_stage1_score(stock: dict, today_weekday: int | None = None) -> tuple[float, list[str]]:
     """
-    1 銘柄の Stage1 スコアとシグナル列を返す。
-    _apply_stage1_filters と _log_stage1_distribution（診断）の両方で使う
-    単一の真実源（DRY 原則のため）。
+    1 銘柄の Stage1 スコアとシグナル列を返す（単一の真実源）。
+    _apply_stage1_filters / _score_all_stage1 / 診断ログの全箇所で使う。
 
+    今日の曜日（0=月〜4=金）を渡すと曜日ボーナス/ペナルティを適用する。
+    省略時は date.today() から自動取得。
+
+    【スコア根拠 — 5年バックテスト（設計2021/05〜2025/09 / 検証2025/10〜2026/04）】
     Returns: (score, signals)  -- 閾値判定はここでは行わない。
     """
+    import datetime as _dt
+    if today_weekday is None:
+        today_weekday = _dt.date.today().weekday()
+
     score = 0.0
     signals: list[str] = []
 
@@ -850,17 +857,13 @@ def _calc_stage1_score(stock: dict) -> tuple[float, list[str]]:
     rsi5 = float(stock.get("rsi5", 50) or 50)
     rsi14 = float(stock.get("rsi14", 50) or 50)
     vol_ratio = float(stock.get("vol_ratio", 1) or 1)
-    w52_pos = float(stock.get("w52_pos", 50) or 50)
     close_val = float(stock.get("close", 0) or 0)
     sma25_val = float(stock.get("sma25", 0) or 0)
 
-    # 短期シグナル（最重要）
+    # ── 短期複合シグナル（最重要） ──────────────────────────────────────────────
     if breakout and dvs > 0 and rsi5 <= 20:
         score += 120
         signals.append("breakout+dvs正+rsi5<20(最優秀)")
-    elif breakout and dvs > 0 and rsi5 <= 30:
-        score += 80
-        signals.append("breakout+dvs正+rsi5低")
     elif breakout and dvs > 0:
         score += 50
         signals.append("breakout+dvs正")
@@ -868,7 +871,7 @@ def _calc_stage1_score(stock: dict) -> tuple[float, list[str]]:
         score += 20
         signals.append("breakout")
 
-    # 方向性出来高（DVS単独での加点: バックテストでDVS>20がEV+0.506%）
+    # ── 方向性出来高（DVS） — DVS>10 が最小有効閾値（検証EV+0.235%） ──────────
     if dvs > 20:
         score += 30
         signals.append(f"DVS={dvs:.0f}(強い買い越し)")
@@ -879,7 +882,7 @@ def _calc_stage1_score(stock: dict) -> tuple[float, list[str]]:
         score += 10
         signals.append(f"DVS={dvs:.0f}(弱い買い越し)")
 
-    # 出来高急増（1.3倍まで緩和）
+    # ── 出来高急増 ─────────────────────────────────────────────────────────────
     if vol_ratio >= 2.0:
         score += 40
         signals.append(f"出来高{vol_ratio:.1f}倍")
@@ -890,15 +893,7 @@ def _calc_stage1_score(stock: dict) -> tuple[float, list[str]]:
         score += 10
         signals.append(f"出来高{vol_ratio:.1f}倍")
 
-    # 52週安値圏（40%まで緩和）
-    if w52_pos <= 20:
-        score += 30
-        signals.append(f"52w安値圏{w52_pos:.0f}%")
-    elif w52_pos <= 40:
-        score += 15
-        signals.append(f"52w安値圏{w52_pos:.0f}%")
-
-    # RSI売られすぎ（40まで緩和）
+    # ── RSI14 売られすぎ ────────────────────────────────────────────────────────
     if rsi14 <= 25:
         score += 25
         signals.append(f"RSI14={rsi14:.0f}")
@@ -909,30 +904,37 @@ def _calc_stage1_score(stock: dict) -> tuple[float, list[str]]:
         score += 8
         signals.append(f"RSI14={rsi14:.0f}")
 
-    # RSI5 売られすぎ（バックテスト最優秀シグナル）
+    # ── RSI5 売られすぎ — RSI5<10: 検証EV+0.937% / RSI5<20: +0.573% ──────────
     if rsi5 <= 10:
         score += 60
         signals.append(f"RSI5={rsi5:.0f}(極端売られすぎ)")
     elif rsi5 <= 20:
         score += 40
         signals.append(f"RSI5={rsi5:.0f}(超売られすぎ)")
-    elif rsi5 <= 30:
-        score += 15
-        signals.append(f"RSI5={rsi5:.0f}(売られすぎ)")
 
-    # RSI5<20 + 出来高1.5倍 = バックテスト最高EV複合シグナル
+    # ── RSI5<20 + 出来高1.5倍 複合 — 検証EV+0.934%, 安定55% ──────────────────
     if rsi5 <= 20 and vol_ratio >= 1.5:
-        score += 30
+        score += 50
         signals.append("RSI5<20+出来高急増(複合最優秀)")
 
-    # SMA25押し目（下落相場でも拾える）
+    # ── 水・木 + RSI5<20 — 検証EV+0.867%, 安定97% ──────────────────────────────
+    if today_weekday in (2, 3) and rsi5 <= 20:
+        score += 50
+        signals.append(f"{'水' if today_weekday == 2 else '木'}曜+RSI5<20(高確度)")
+
+    # ── 月曜ペナルティ — 月曜除外で検証EV+0.244%改善 ───────────────────────────
+    if today_weekday == 0:
+        score -= 40
+        signals.append("月曜エントリー(減点)")
+
+    # ── SMA25押し目 ─────────────────────────────────────────────────────────────
     if sma25_val > 0 and close_val > 0:
         sma25_diff = (close_val - sma25_val) / sma25_val * 100
         if -8 <= sma25_diff <= -2:
             score += 15
             signals.append(f"SMA25比{sma25_diff:.1f}%押し目")
 
-    # 弱気シグナルはペナルティ（事実上除外）
+    # ── 弱気シグナルは除外 ──────────────────────────────────────────────────────
     if dvs <= -10:
         score -= 200
         signals.append("dvs負(除外)")
@@ -942,7 +944,9 @@ def _calc_stage1_score(stock: dict) -> tuple[float, list[str]]:
 
 def _score_all_stage1(stocks: list[dict]) -> list[float]:
     """全候補のスコアだけを集計（診断ログ用、シグナル列は捨てる）。"""
-    return [_calc_stage1_score(s)[0] for s in stocks]
+    import datetime as _dt
+    wd = _dt.date.today().weekday()
+    return [_calc_stage1_score(s, today_weekday=wd)[0] for s in stocks]
 
 
 def _log_stage1_distribution(scores: list[float], threshold: float) -> None:
@@ -988,125 +992,28 @@ def _log_stage1_distribution(scores: list[float], threshold: float) -> None:
               f"(現状 MAX_STOCKS={MAX_STOCKS} で 20位以上の銘柄が選ばれる)")
 
 
-def _apply_stage1_filters(stocks: list[dict]) -> list[dict]:
+def _apply_stage1_filters(
+    stocks: list[dict],
+    today_weekday: int | None = None,
+) -> list[dict]:
     """
     テクニカル条件でフィルタし stage1_score と stage1_signals を付与する。
-    スコア > 0 の銘柄のみ通過。
+    score >= STAGE1_MIN_SCORE（既定60）の銘柄のみ通過。
 
-    【閾値根拠 — 5年バックテスト（設計2021/05〜2025/09 / 検証2025/10〜2026/04）】
-    採用条件: 設計安定性 >= 50% かつ 検証EV > 0
-    - RSI5<20: 検証EV+0.573% → 維持
-    - RSI5<10: 検証EV+0.937% → 維持
-    - RSI5<20 + vol>=1.5x: 検証EV+0.934%, 安定55% → ボーナス+50pt
-    - 水木 + RSI5<20: 検証EV+0.867%, 安定97% → 新規追加
-    - 月曜エントリー: 検証EV低下 → ペナルティ-40pt
-    - DVS > 10: 検証EV+0.235% → 維持
-    - RSI5<30: 根拠なし → 削除
-    - 52週安値圏: 検証EV-0.160% 過学習確定 → 削除
+    閾値60の意味: RSI5≤10単体、RSI5≤20+DVS>10、RSI5≤20+breakout 等
+    の「明確な2シグナル以上の組み合わせ」が最低条件。
+    score > 0 だった旧仕様では弱い単独シグナル（DVS+10, vol1.3x 等）でも
+    通過してしまい、上位20件の品質が下がっていた。
+
+    today_weekday: 0=月〜4=金。省略時は date.today() から自動取得（テスト時に渡す）。
     """
     import datetime as _dt
-    today_weekday = _dt.date.today().weekday()  # 0=月, 1=火, 2=水, 3=木, 4=金
+    wd = today_weekday if today_weekday is not None else _dt.date.today().weekday()
 
     passed = []
     for s in stocks:
-        score = 0.0
-        signals: list[str] = []
-
-        breakout = bool(s.get("breakout_5d", False))
-        dvs = float(s.get("dvs", 0) or 0)
-        rsi5 = float(s.get("rsi5", 50) or 50)
-        rsi14 = float(s.get("rsi14", 50) or 50)
-        vol_ratio = float(s.get("vol_ratio", 1) or 1)
-        close_val = float(s.get("close", 0) or 0)
-        sma25_val = float(s.get("sma25", 0) or 0)
-
-        # ── 短期複合シグナル（最重要） ──────────────────────────────────────────
-        if breakout and dvs > 0 and rsi5 <= 20:
-            score += 120
-            signals.append("breakout+dvs正+rsi5<20(最優秀)")
-        elif breakout and dvs > 0:
-            score += 50
-            signals.append("breakout+dvs正")
-        elif breakout:
-            score += 20
-            signals.append("breakout")
-
-        # ── 方向性出来高（DVS） ─────────────────────────────────────────────────
-        # DVS>10 が最小有効閾値（検証EV+0.235%）
-        if dvs > 20:
-            score += 30
-            signals.append(f"DVS={dvs:.0f}(強い買い越し)")
-        elif dvs > 10:
-            score += 20
-            signals.append(f"DVS={dvs:.0f}(買い越し)")
-        elif dvs > 0:
-            score += 10
-            signals.append(f"DVS={dvs:.0f}(弱い買い越し)")
-
-        # ── 出来高急増 ──────────────────────────────────────────────────────────
-        if vol_ratio >= 2.0:
-            score += 40
-            signals.append(f"出来高{vol_ratio:.1f}倍")
-        elif vol_ratio >= 1.5:
-            score += 20
-            signals.append(f"出来高{vol_ratio:.1f}倍")
-        elif vol_ratio >= 1.3:
-            score += 10
-            signals.append(f"出来高{vol_ratio:.1f}倍")
-
-        # ── RSI14 売られすぎ ────────────────────────────────────────────────────
-        if rsi14 <= 25:
-            score += 25
-            signals.append(f"RSI14={rsi14:.0f}")
-        elif rsi14 <= 35:
-            score += 15
-            signals.append(f"RSI14={rsi14:.0f}")
-        elif rsi14 <= 40:
-            score += 8
-            signals.append(f"RSI14={rsi14:.0f}")
-
-        # ── RSI5 売られすぎ ─────────────────────────────────────────────────────
-        # RSI5<10: 検証EV+0.937%（安定67%）
-        # RSI5<20: 検証EV+0.573%（安定54%）
-        # RSI5<30 以上: 検証根拠なし → 削除
-        if rsi5 <= 10:
-            score += 60
-            signals.append(f"RSI5={rsi5:.0f}(極端売られすぎ)")
-        elif rsi5 <= 20:
-            score += 40
-            signals.append(f"RSI5={rsi5:.0f}(超売られすぎ)")
-
-        # ── RSI5<20 + 出来高1.5倍 複合シグナル ─────────────────────────────────
-        # 5年設計EV+0.446% → 検証EV+0.934%（安定55%）— 最強単体シグナル
-        if rsi5 <= 20 and vol_ratio >= 1.5:
-            score += 50
-            signals.append("RSI5<20+出来高急増(複合最優秀)")
-
-        # ── 水・木 + RSI5<20 ────────────────────────────────────────────────────
-        # 設計安定性97%（全パラメータ組み合わせでほぼ確実にプラス）、検証EV+0.867%
-        if today_weekday in (2, 3) and rsi5 <= 20:
-            score += 50
-            signals.append(f"{'水' if today_weekday == 2 else '木'}曜+RSI5<20(高確度)")
-
-        # ── 月曜ペナルティ ──────────────────────────────────────────────────────
-        # 月曜エントリーは検証EV低下（バックテスト: 月曜除外で+0.244%改善）
-        if today_weekday == 0:
-            score -= 40
-            signals.append("月曜エントリー(減点)")
-
-        # ── SMA25押し目 ─────────────────────────────────────────────────────────
-        if sma25_val > 0 and close_val > 0:
-            sma25_diff = (close_val - sma25_val) / sma25_val * 100
-            if -8 <= sma25_diff <= -2:
-                score += 15
-                signals.append(f"SMA25比{sma25_diff:.1f}%押し目")
-
-        # ── 弱気シグナルは除外 ──────────────────────────────────────────────────
-        if dvs <= -10:
-            score -= 200
-            signals.append("dvs負(除外)")
-
-        if score <= 0:
+        score, signals = _calc_stage1_score(s, today_weekday=wd)
+        if score < STAGE1_MIN_SCORE:
             continue
         s_copy = s.copy()
         s_copy["stage1_score"] = score
