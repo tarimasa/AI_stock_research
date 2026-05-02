@@ -55,7 +55,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 TRAIN_START = os.environ.get("TRAIN_START", "2024-10-01")
 TRAIN_END   = os.environ.get("TRAIN_END",   "2025-09-30")
 VAL_START   = os.environ.get("VAL_START",   "2025-10-01")
-VAL_END     = os.environ.get("VAL_END",     "2026-03-31")
+VAL_END     = os.environ.get("VAL_END",     "2026-04-30")
 BACKTEST_START = TRAIN_START   # 後方互換 (multi_day_backtest imports this)
 BACKTEST_END   = VAL_END
 # ウォームアップ用のカレンダー日数（RSI-14/SMA-25/52週高安値等の計算に必要）
