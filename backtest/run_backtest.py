@@ -52,7 +52,7 @@ from dotenv import load_dotenv
 load_dotenv(PROJECT_ROOT / ".env")
 
 # ── 設定 ──────────────────────────────────────────────────────────────────────
-TRAIN_START = os.environ.get("TRAIN_START", "2024-10-01")
+TRAIN_START = os.environ.get("TRAIN_START", "2021-05-01")
 TRAIN_END   = os.environ.get("TRAIN_END",   "2025-09-30")
 VAL_START   = os.environ.get("VAL_START",   "2025-10-01")
 VAL_END     = os.environ.get("VAL_END",     "2026-04-30")
