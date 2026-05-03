@@ -5,7 +5,7 @@ on:
     # GitHub Actions はスケジュール通りに起動する保証がなく、混雑時に30分〜2時間遅延することがある。
     # ユーザーの発注可能窓: 7:00〜9:00 JST（朝）と 12:00〜13:00 JST（昼）の2回。
     - cron: '30 21 * * 0-4'   # 06:30 JST / 朝:9:00 前場寄付向け（目標着信 7:00〜8:30）
-    - cron: '45 2 * * 1-5'    # 11:45 JST / 昼:12:30 後場寄付向け（目標着信 12:00〜12:30、前場引け後）
+    - cron: '0 2 * * 1-5'     # 11:00 JST / 昼:12:30 後場寄付向け（目標着信 12:00〜12:30、前場引け後）
   workflow_dispatch:           # 手動実行も可能
     inputs:
       session:
@@ -162,7 +162,7 @@ jobs:
       - name: Resolve session
         id: session
         run: |
-          if [ "${{ github.event.schedule }}" = "45 2 * * 1-5" ]; then
+          if [ "${{ github.event.schedule }}" = "0 2 * * 1-5" ]; then
             echo "value=noon" >> "$GITHUB_OUTPUT"
           elif [ -n "${{ inputs.session }}" ]; then
             echo "value=${{ inputs.session }}" >> "$GITHUB_OUTPUT"
@@ -181,7 +181,7 @@ jobs:
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
           DRY_RUN: 'false'
           SESSION: ${{ steps.session.outputs.value }}
-          MAX_STOCKS_TO_ANALYZE: '20'
+          MAX_STOCKS_TO_ANALYZE: '10'
           # フルスキャンモード: GitHub Variables で FULL_SCAN_ENABLED=true に設定して有効化
           FULL_SCAN_ENABLED: ${{ vars.FULL_SCAN_ENABLED || 'false' }}
           # 移行期間中の並行比較: SCAN_COMPARE=true で差分ログを出力

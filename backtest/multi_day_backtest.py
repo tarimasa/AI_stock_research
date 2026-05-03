@@ -213,7 +213,7 @@ def compute_outcomes(
     sl_pct: float,
     max_days: int,
     holding_mode: str = "overnight",
-    cost_pct: float = ROUND_TRIP_COST_PCT,
+    cost_pct: float = 0.0,
 ) -> pd.Series:
     """
     各シグナル行のリターンを計算して返す（ベクトル化）。
