@@ -32,7 +32,7 @@ MODEL = "claude-haiku-4-5-20251001"
 MAX_RETRIES = 3
 # Stage1 通過候補の Stage2 投入上限。screener.MAX_STOCKS と同期させる。
 # 機会損失抑制のため 10 → 20 に拡張（PR #20 設計判断、20 件運用で品質と速度の両立）。
-_MAX_CANDIDATES = int(os.environ.get("MAX_STOCKS_TO_ANALYZE", 20))
+_MAX_CANDIDATES = int(os.environ.get("MAX_STOCKS_TO_ANALYZE", 10))
 # タイムアウトを 240 秒に延長（候補 20 件で平均 15-30 秒、外れ値考慮）
 _TIMEOUT = httpx.Timeout(240.0, connect=10.0)
 # 短期投資の運用判断には再現性が重要なので temperature=0 で確定的応答にする。
@@ -47,8 +47,8 @@ SYSTEM_PROMPT = """\
 # ルール
 
 ## 選定
-- 推奨1〜3銘柄。短期(1-3日)はシグナル強度順。中期(5-10日)は異なるセクター必須
-- 短期は同一セクター2銘柄まで可。3銘柄全て同一は不可
+- 推奨1〜2銘柄。短期(1-3日)はシグナル強度順。中期(5-10日)は異なるセクター必須
+- 短期は同一セクター2銘柄まで可
 - 同一銘柄の連続推奨禁止
 
 ## シグナル優先度

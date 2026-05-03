@@ -24,7 +24,7 @@ from master_manager import get_master
 
 load_dotenv()
 
-MAX_STOCKS = int(os.environ.get("MAX_STOCKS_TO_ANALYZE", 20))
+MAX_STOCKS = int(os.environ.get("MAX_STOCKS_TO_ANALYZE", 10))
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 # 並列ワーカー数: yfinance のレートリミットを考慮して 6 に設定。
 # 環境変数 SCREENER_WORKERS で上書き可能。
