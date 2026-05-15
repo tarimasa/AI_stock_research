@@ -1,0 +1,4 @@
+﻿period,label,n_signals,n_taken,participate_pct,ev_when_taken,win_rate,ev_per_signal,total_pnl_pct
+val,A. 指値のみ (現行),39853,7727,19.39,-0.0453,44.95,-0.0088,-350.24
+val,B. 寄成行 (常時),39853,39853,100.0,-0.242,44.4,-0.242,-9645.82
+val,C. gap<= +1.0%,39853,33011,82.83,-0.2635,44.3,-0.2183,-8698.3
