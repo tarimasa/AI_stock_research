@@ -310,9 +310,10 @@ def run_report() -> None:
             or 0
         )
         sma25 = stock.get("sma25")
+        atr14 = stock.get("atr14")
         if current_price > 0:
             stock["price_candidates"] = price_calculator.calc_all_candidates(
-                current_price, sma25, vix=vix
+                current_price, sma25, vix=vix, atr14=atr14
             )
 
     # Step 4: 各銘柄の詳細データ取得 & ニュース付与
@@ -469,9 +470,10 @@ def run_noon_report() -> None:
     for stock in noon_candidates:
         current_price = stock.get("close") or stock.get("price") or 0
         sma25 = stock.get("sma25")
+        atr14 = stock.get("atr14")
         if current_price > 0:
             stock["price_candidates"] = price_calculator.calc_all_candidates(
-                current_price, sma25, vix=vix
+                current_price, sma25, vix=vix, atr14=atr14
             )
         # stage1_signals に noon_signals を追記（LINE 表示用）
         existing = stock.get("stage1_signals", []) or []
