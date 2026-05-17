@@ -10,7 +10,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from price_calculator import _tick_round, calc_price_candidates, calc_all_candidates, format_candidates_for_prompt
+from price_calculator import (
+    _tick_round, _calc_buy_now_price,
+    calc_price_candidates, calc_all_candidates, format_candidates_for_prompt,
+    ATR_MULT_BUY_NOW, FALLBACK_BUY_NOW_PCT,
+)
 
 
 # ──────────────────────────────────────────────────────────
@@ -120,6 +124,74 @@ class TestCalcPriceCandidates:
         risk = bn["buy_price"] - bn["stop_loss"]
         assert risk > 0
         assert reward_low / risk >= 1.4   # TP_low=7.5%, SL=5% → RR=1.5（呼値丸めで微差許容）
+
+
+# ──────────────────────────────────────────────────────────
+# 「今すぐ買う」指値: ATR連動 / -3.5% フォールバック
+# 仕様: バックテスト (TRAIN 2021〜2025) で ATR×1.5 が VAL EV +0.036%/シグナルと最良。
+#   ATR が無い銘柄では -3.5% 固定にフォールバック (これも VAL EV +0.017% で現行 -0.7% を上回る)。
+# ──────────────────────────────────────────────────────────
+
+class TestBuyNowAtrBased:
+    def test_atr_based_offset_is_close_minus_1_5_atr(self):
+        """ATR を渡すと買値 = Close - 1.5×ATR （呼値丸め込み）になる。"""
+        # ATR14=30 円, Close=2000 円 → 2000 - 45 = 1955 → 呼値1円
+        p = _calc_buy_now_price(2000.0, atr14=30.0)
+        assert p == _tick_round(2000.0 - 1.5 * 30.0)
+        assert p == 1955.0
+
+    def test_atr_based_uses_module_multiplier(self):
+        # 倍率定数を変更したら結果も追従するはず
+        p = _calc_buy_now_price(1000.0, atr14=20.0)
+        assert p == _tick_round(1000.0 - ATR_MULT_BUY_NOW * 20.0)
+
+    def test_fallback_when_atr_is_none(self):
+        """ATR が None なら -3.5% 固定にフォールバックする。"""
+        p = _calc_buy_now_price(1000.0, atr14=None)
+        assert p == _tick_round(1000.0 * (1.0 + FALLBACK_BUY_NOW_PCT / 100.0))
+        assert p == 965.0   # 1000 × 0.965
+
+    def test_fallback_when_atr_is_zero(self):
+        """ATR=0 は意味のあるデータでないのでフォールバック。"""
+        p = _calc_buy_now_price(1000.0, atr14=0.0)
+        assert p == 965.0
+
+    def test_fallback_when_atr_is_negative(self):
+        p = _calc_buy_now_price(1000.0, atr14=-5.0)
+        assert p == 965.0   # 安全側にフォールバック
+
+    def test_low_vol_stock_gives_shallow_limit(self):
+        """低ボラ銘柄 (ATR=10円, Close=1000) → 限定は 985 円 (-1.5%相当)"""
+        p = _calc_buy_now_price(1000.0, atr14=10.0)
+        assert p == 985.0
+
+    def test_high_vol_stock_gives_deep_limit(self):
+        """高ボラ銘柄 (ATR=80円, Close=1000) → 限定は 880 円 (-12%相当)"""
+        p = _calc_buy_now_price(1000.0, atr14=80.0)
+        assert p == 880.0
+
+    def test_calc_price_candidates_propagates_atr(self):
+        """calc_price_candidates の戻り値に atr14 が含まれ buy_now に反映される。"""
+        result = calc_price_candidates(
+            1000.0, sma25=None, holding_days=3, vix=20.0, atr14=30.0,
+        )
+        assert result["atr14"] == 30.0
+        assert result["buy_now"]["buy_price"] == _tick_round(1000.0 - 45.0)
+
+    def test_calc_price_candidates_fallback_when_atr_omitted(self):
+        """既存呼び出し (atr14 省略) は -3.5% フォールバックで動く。"""
+        result = calc_price_candidates(
+            1000.0, sma25=None, holding_days=3, vix=20.0,
+        )
+        assert result["atr14"] is None
+        assert result["buy_now"]["buy_price"] == 965.0
+
+    def test_calc_all_candidates_propagates_atr_to_both_periods(self):
+        result = calc_all_candidates(1000.0, sma25=None, vix=20.0, atr14=30.0)
+        assert result["short_term"]["buy_now"]["buy_price"] == _tick_round(955.0)
+        assert result["medium_term"]["buy_now"]["buy_price"] == _tick_round(955.0)
+        assert result["short_term"]["atr14"] == 30.0
+        assert result["medium_term"]["atr14"] == 30.0
 
 
 # ──────────────────────────────────────────────────────────

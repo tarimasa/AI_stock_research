@@ -113,6 +113,21 @@ def score_stock(df: pd.DataFrame, info: dict, market_data: dict | None = None) -
 
     # ── 追加スコア（新規） ──────────────────────────
 
+    # ATR14（円スケール）: price_calculator が ATR×1.5 で買い指値を計算
+    # 14本以上履歴があれば計算可能。バックテストの最適 k=1.5 / VAL EV +0.036%/シグナル
+    atr14 = None
+    if len(df) >= 15:
+        prev_close = df["Close"].shift(1)
+        tr = pd.concat([
+            (df["High"] - df["Low"]).abs(),
+            (df["High"] - prev_close).abs(),
+            (df["Low"]  - prev_close).abs(),
+        ], axis=1).max(axis=1)
+        atr_series = tr.rolling(14, min_periods=14).mean()
+        atr_val = atr_series.iloc[-1]
+        if pd.notna(atr_val) and atr_val > 0:
+            atr14 = float(atr_val)
+
     # 出来高比率（最大20点）: 20日平均比で今日の出来高が急増 → 資金流入シグナル
     vol_ratio = 1.0
     if "Volume" in df.columns and len(df) >= 20:
@@ -321,6 +336,7 @@ def score_stock(df: pd.DataFrame, info: dict, market_data: dict | None = None) -
         "breakout_5d": breakout_score > 0,                # 5日高値ブレイクアウト
         "candle_pattern": candle_pattern,                 # 足型シグナル
         "sma25": round(sma25, 1),                         # 25日移動平均（price_calculator が使用）
+        "atr14": round(atr14, 2) if atr14 is not None else None,  # 14日ATR (price_calculator がATR×1.5指値で使用)
     }
 
     return score, extra_signals
@@ -705,10 +721,21 @@ def _calc_technicals_vectorized(bulk_df: pd.DataFrame) -> pd.DataFrame:
         df["Volume"] / df["avg_vol_20"].replace(0, float("nan"))
     ).fillna(1.0)
 
+    # ATR14（円スケール）: price_calculator が ATR×1.5 で買い指値を計算
+    prev_close = grouped["Close"].transform(lambda x: x.shift(1))
+    tr = pd.concat([
+        (df["High"] - df["Low"]).abs(),
+        (df["High"] - prev_close).abs(),
+        (df["Low"]  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    df["atr14"] = tr.groupby(df["Code"]).transform(
+        lambda x: x.rolling(14, min_periods=14).mean()
+    )
+
     # 最新行のみ抽出
     latest = df.groupby("Code").tail(1).copy()
     keep = ["Code", "Close", "Volume", "rsi5", "rsi14", "sma25",
-            "breakout_5d", "dvs", "vol_ratio", "w52_pos"]
+            "breakout_5d", "dvs", "vol_ratio", "w52_pos", "atr14"]
     available = [c for c in keep if c in latest.columns]
     result = latest[available].rename(columns={"Close": "close", "Volume": "volume"})
     result = result.copy()
@@ -763,6 +790,20 @@ def _calc_technicals_individual(
             w52_range = high_52w - low_52w
             w52_pos = (pc["close"] - low_52w) / w52_range * 100 if w52_range > 0 else 50.0
 
+            # ATR14（円スケール）: price_calculator が ATR×1.5 で買い指値を計算
+            atr14 = None
+            if len(hist) >= 15:
+                prev_close_s = hist["Close"].shift(1)
+                tr_s = pd.concat([
+                    (hist["High"] - hist["Low"]).abs(),
+                    (hist["High"] - prev_close_s).abs(),
+                    (hist["Low"]  - prev_close_s).abs(),
+                ], axis=1).max(axis=1)
+                atr_s = tr_s.rolling(14, min_periods=14).mean()
+                atr_val = atr_s.iloc[-1]
+                if pd.notna(atr_val) and atr_val > 0:
+                    atr14 = round(float(atr_val), 2)
+
             info_m = master.get(code4, {})
             return {
                 "code": code4,
@@ -777,6 +818,7 @@ def _calc_technicals_individual(
                 "dvs": round(dvs, 1),
                 "vol_ratio": round(vol_ratio, 2),
                 "w52_pos": round(w52_pos, 1),
+                "atr14": atr14,
             }
         except Exception as e:
             print(f"[screener] テクニカル計算エラー {code4}: {e}")
@@ -814,6 +856,12 @@ def _calc_technicals_for_fullscan(
             if code4 not in today_codes:
                 continue
             info_m = master.get(code4, {})
+            atr_raw = row.get("atr14")
+            atr14_val = (
+                round(float(atr_raw), 2)
+                if atr_raw is not None and pd.notna(atr_raw) and float(atr_raw) > 0
+                else None
+            )
             results.append({
                 "code": code4,
                 "name": info_m.get("name") or code4,
@@ -827,6 +875,7 @@ def _calc_technicals_for_fullscan(
                 "dvs": round(float(row.get("dvs", 0) or 0), 1),
                 "vol_ratio": round(float(row.get("vol_ratio", 1) or 1), 2),
                 "w52_pos": round(float(row.get("w52_pos", 50) or 50), 1),
+                "atr14": atr14_val,
             })
         return results
     else:
