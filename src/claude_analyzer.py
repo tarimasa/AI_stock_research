@@ -18,6 +18,7 @@ J-Quants 統合による追加変更:
 
 import json
 import os
+import random
 import time
 from datetime import datetime
 
@@ -29,7 +30,28 @@ load_dotenv()
 
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 MODEL = "claude-haiku-4-5-20251001"
-MAX_RETRIES = 3
+# 529 Overloaded など API 過負荷時のために試行回数を増やす。
+# 通常エラーは MAX_RETRIES の前半で終わるが、過負荷時は長めバックオフで粘る。
+MAX_RETRIES = 7
+
+
+def _is_overloaded_error(e: Exception) -> bool:
+    """529 Overloaded / 503 / rate limit / 429 を判別 (大文字小文字を無視)。"""
+    s = str(e).lower()
+    return any(t in s for t in ("529", "overloaded", "503", "rate_limit", "429"))
+
+
+def _wait_for_retry(attempt: int, error: Exception) -> float:
+    """
+    リトライ前の待機秒数を返す。
+    - 過負荷系 (529/503/429): 30s, 60s, 120s, 240s, 240s, 240s, 240s + jitter
+      → API 全体が一時的に詰まっているケースなので長く待つ
+    - その他 (タイムアウト/接続断 等): 1, 2, 4, 8, ... 秒の指数バックオフ
+    """
+    if _is_overloaded_error(error):
+        base = min(30 * (2 ** attempt), 240)
+        return base + random.uniform(0, 5)  # jitter で thundering herd 回避
+    return 2 ** attempt
 # Stage1 通過候補の Stage2 投入上限。screener.MAX_STOCKS と同期させる。
 # 機会損失抑制のため 10 → 20 に拡張（PR #20 設計判断、20 件運用で品質と速度の両立）。
 _MAX_CANDIDATES = int(os.environ.get("MAX_STOCKS_TO_ANALYZE", 10))
@@ -278,8 +300,9 @@ def analyze(
             return _parse_claude_response(message)
 
         except Exception as e:
-            wait = 2 ** attempt
-            print(f"[claude_analyzer] 試行 {attempt + 1}/{MAX_RETRIES} 失敗: {e}。{wait}秒後にリトライ")
+            wait = _wait_for_retry(attempt, e)
+            tag = "過負荷" if _is_overloaded_error(e) else "エラー"
+            print(f"[claude_analyzer] 試行 {attempt + 1}/{MAX_RETRIES} 失敗({tag}): {e}。{wait:.1f}秒後にリトライ")
             if attempt < MAX_RETRIES - 1:
                 time.sleep(wait)
 
@@ -424,9 +447,9 @@ def analyze_with_claude_safe(
             )
             return _parse_claude_response(message)
 
-        except anthropic.APITimeoutError:
-            wait = 2 ** attempt
-            print(f"[claude_analyzer] タイムアウト。候補を削減してリトライ ({wait}秒後)")
+        except anthropic.APITimeoutError as e:
+            wait = _wait_for_retry(attempt, e)
+            print(f"[claude_analyzer] タイムアウト。候補を削減してリトライ ({wait:.1f}秒後)")
             if attempt < MAX_RETRIES - 1:
                 # タイムアウト時は候補をさらに削減
                 if len(current_candidates) > _MIN_CANDIDATES:
@@ -436,8 +459,9 @@ def analyze_with_claude_safe(
                     )
                 time.sleep(wait)
         except Exception as e:
-            wait = 2 ** attempt
-            print(f"[claude_analyzer] 試行 {attempt + 1}/{MAX_RETRIES} 失敗: {e}。{wait}秒後にリトライ")
+            wait = _wait_for_retry(attempt, e)
+            tag = "過負荷" if _is_overloaded_error(e) else "エラー"
+            print(f"[claude_analyzer] 試行 {attempt + 1}/{MAX_RETRIES} 失敗({tag}): {e}。{wait:.1f}秒後にリトライ")
             if attempt < MAX_RETRIES - 1:
                 time.sleep(wait)
 
@@ -489,8 +513,9 @@ def analyze_with_claude_cached(
             return _parse_claude_response(message)
 
         except Exception as e:
-            wait = 2 ** attempt
-            print(f"[claude_analyzer] 試行 {attempt + 1}/{MAX_RETRIES} 失敗: {e}。{wait}秒後にリトライ")
+            wait = _wait_for_retry(attempt, e)
+            tag = "過負荷" if _is_overloaded_error(e) else "エラー"
+            print(f"[claude_analyzer] 試行 {attempt + 1}/{MAX_RETRIES} 失敗({tag}): {e}。{wait:.1f}秒後にリトライ")
             if attempt < MAX_RETRIES - 1:
                 time.sleep(wait)
 
