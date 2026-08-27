@@ -1,4 +1,5 @@
-anthropic>=0.40.0
+# SDK 1.x 系に固定（1.x で temperature 等のキーワード引数が削除され extra_body 経由に移行済み）
+anthropic>=1,<2
 # J-Quants Python クライアント（日本株OHLCV・マスタ・決算カレンダー取得）
 jquants-api-client>=2.0.0
 # yfinance は US 市場指標（VIX・S&P500・USD/JPY 等）の取得に引き続き使用
@@ -7,7 +8,6 @@ yfinance>=0.2.40
 pandas_ta>=0.3.14b
 feedparser>=6.0.11
 requests>=2.32.0
-httpx>=0.27.0
 python-dotenv>=1.0.0
 pytz>=2024.1
 fastapi>=0.115.0

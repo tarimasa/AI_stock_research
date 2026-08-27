@@ -23,7 +23,6 @@ import time
 from datetime import datetime
 
 import anthropic
-import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -56,11 +55,15 @@ def _wait_for_retry(attempt: int, error: Exception) -> float:
 # 機会損失抑制のため 10 → 20 に拡張（PR #20 設計判断、20 件運用で品質と速度の両立）。
 _MAX_CANDIDATES = int(os.environ.get("MAX_STOCKS_TO_ANALYZE", 10))
 # タイムアウトを 240 秒に延長（候補 20 件で平均 15-30 秒、外れ値考慮）
-_TIMEOUT = httpx.Timeout(240.0, connect=10.0)
+# anthropic.Timeout は SDK が要求する HTTP ライブラリ（1.x では httpx2）の Timeout。
+_TIMEOUT = anthropic.Timeout(240.0, connect=10.0)
 # 短期投資の運用判断には再現性が重要なので temperature=0 で確定的応答にする。
 # 同一プロンプトに対して毎回同じ推奨が返るようになる（ユーザー報告 #20 対応）。
 # 環境変数 CLAUDE_TEMPERATURE で上書き可能（探索用に 0.3 などにも設定可能）。
+# SDK 1.x で temperature キーワード引数が削除されたため extra_body 経由で送る
+# （haiku-4-5 など temperature を受け付けるモデルに限り有効な公式移行手順）。
 _TEMPERATURE = float(os.environ.get("CLAUDE_TEMPERATURE", 0.0))
+_EXTRA_BODY = {"temperature": _TEMPERATURE}
 
 # ── システムプロンプト（圧縮版 ≤800 トークン） ────────────────────────────
 SYSTEM_PROMPT = """\
@@ -296,12 +299,15 @@ def analyze(
             message = client.messages.create(
                 model=MODEL,
                 max_tokens=4096,
-                temperature=_TEMPERATURE,
+                extra_body=_EXTRA_BODY,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_prompt}],
             )
             return _parse_claude_response(message)
 
+        except TypeError:
+            # 呼び出し引数の不備などコード起因のバグはリトライしても回復しない
+            raise
         except Exception as e:
             wait = _wait_for_retry(attempt, e)
             tag = "過負荷" if _is_overloaded_error(e) else "エラー"
@@ -444,7 +450,7 @@ def analyze_with_claude_safe(
             message = client.messages.create(
                 model=MODEL,
                 max_tokens=4096,
-                temperature=_TEMPERATURE,
+                extra_body=_EXTRA_BODY,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user}],
             )
@@ -461,6 +467,9 @@ def analyze_with_claude_safe(
                         current_candidates, macro_result, master, upcoming_earnings
                     )
                 time.sleep(wait)
+        except TypeError:
+            # 呼び出し引数の不備などコード起因のバグはリトライしても回復しない
+            raise
         except Exception as e:
             wait = _wait_for_retry(attempt, e)
             tag = "過負荷" if _is_overloaded_error(e) else "エラー"
@@ -499,7 +508,7 @@ def analyze_with_claude_cached(
             message = client.messages.create(
                 model=MODEL,
                 max_tokens=4096,
-                temperature=_TEMPERATURE,
+                extra_body=_EXTRA_BODY,
                 system=[
                     {
                         "type": "text",
@@ -515,6 +524,9 @@ def analyze_with_claude_cached(
             print(f"[claude_analyzer] cache_read={cache_read}, cache_created={cache_create}")
             return _parse_claude_response(message)
 
+        except TypeError:
+            # 呼び出し引数の不備などコード起因のバグはリトライしても回復しない
+            raise
         except Exception as e:
             wait = _wait_for_retry(attempt, e)
             tag = "過負荷" if _is_overloaded_error(e) else "エラー"
