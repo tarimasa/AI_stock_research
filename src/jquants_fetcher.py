@@ -285,3 +285,120 @@ def fetch_margin_balance(code: str) -> dict:
     """
     return {"code": code, "margin_buy": None, "margin_sell": None,
             "margin_ratio": None, "date": None, "available": False}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 前場四本値 (/equities/bars/daily/am)
+# ─────────────────────────────────────────────────────────────────────────────
+# 仕様（jquants-api-client 2.8.0 の実装で確認）:
+#   - エンドポイント: GET /v2/equities/bars/daily/am
+#   - 日付パラメータなし。code 省略で全銘柄の「直近の前場」を返す
+#   - 列: Date, Code(5桁), MO(前場始値), MH(前場高値), ML(前場安値),
+#         MC(前場終値), MVo(前場出来高), MVa(前場売買代金)
+#   - 前場終了（11:30）後、当日分が反映されるまでは Date が前営業日のまま
+#     → Date == 当日 になった時点を「反映完了」とみなしてポーリングする
+#   ※ 提供プラン・反映時刻は公式仕様ページで要確認（契約外なら 401/403 が返る）
+
+JST = None
+try:
+    from zoneinfo import ZoneInfo
+    JST = ZoneInfo("Asia/Tokyo")
+except Exception:  # pragma: no cover
+    pass
+
+
+def now_jst() -> datetime:
+    return datetime.now(JST) if JST else datetime.utcnow() + timedelta(hours=9)
+
+
+def _to_float(v):
+    try:
+        if v is None or v == "":
+            return None
+        f = float(v)
+        return f if f == f else None  # NaN 除外
+    except (TypeError, ValueError):
+        return None
+
+
+class MorningBarsUnavailable(Exception):
+    """契約プラン外・認証エラーなど、待っても取得できない状態。"""
+
+
+def fetch_morning_bars_today() -> dict | None:
+    """
+    前場四本値を全銘柄一括で1回取得する。
+
+    Returns:
+        当日分が反映済みなら {code4: {"open","high","low","close","volume","value"}}。
+        まだ前営業日のデータしか無い（未反映）場合は None。
+    Raises:
+        MorningBarsUnavailable: 401/403 等、ポーリングしても無駄な場合。
+    """
+    client = _get_client()
+    if client is None:
+        raise MorningBarsUnavailable("J-Quants クライアント未初期化（APIキー未設定 or ライブラリ未導入）")
+
+    try:
+        df = client.get_eq_bars_daily_am()
+    except Exception as e:
+        msg = str(e)
+        if any(s in msg for s in ("401", "403", "Forbidden", "Unauthorized")):
+            raise MorningBarsUnavailable(f"前場四本値 API にアクセスできません（契約プラン外の可能性）: {msg[:200]}")
+        print(f"[jquants] 前場四本値 取得エラー（リトライ対象）: {type(e).__name__}: {msg[:200]}")
+        return None
+
+    if df is None or df.empty or "Date" not in df.columns or df["Date"].isna().all():
+        return None
+
+    today = now_jst().date()
+    latest = df["Date"].max()
+    latest_date = latest.date() if hasattr(latest, "date") else None
+    if latest_date != today:
+        return None
+
+    today_df = df[df["Date"] == latest]
+    result: dict = {}
+    for row in today_df.to_dict("records"):
+        code4 = str(row.get("Code", ""))[:4]
+        o, c = _to_float(row.get("MO")), _to_float(row.get("MC"))
+        if not code4 or not o or not c:
+            continue  # 前場で約定なし
+        result[code4] = {
+            "date": latest_date.isoformat(),
+            "open": o,
+            "high": _to_float(row.get("MH")) or max(o, c),
+            "low": _to_float(row.get("ML")) or min(o, c),
+            "close": c,
+            "volume": _to_float(row.get("MVo")) or 0.0,
+            "value": _to_float(row.get("MVa")) or 0.0,
+        }
+    return result or None
+
+
+def wait_for_morning_bars(deadline: datetime, interval_sec: int = 60) -> dict | None:
+    """
+    当日の前場四本値が反映されるまでポーリングし、反映され次第すぐ返す。
+
+    Args:
+        deadline: この時刻(JST aware)を過ぎたら諦めて None を返す。
+        interval_sec: ポーリング間隔（秒）。
+    Returns:
+        fetch_morning_bars_today() の結果。期限切れ・利用不可なら None（呼び出し側でフォールバック）。
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            bars = fetch_morning_bars_today()
+        except MorningBarsUnavailable as e:
+            print(f"[jquants] {e} → フォールバック")
+            return None
+        if bars:
+            print(f"[jquants] 前場四本値 反映確認 ({now_jst():%H:%M:%S} JST, {attempt}回目, {len(bars)}銘柄)")
+            return bars
+        if now_jst() + timedelta(seconds=interval_sec) > deadline:
+            print(f"[jquants] 前場四本値 未反映のまま期限 {deadline:%H:%M} JST 到達（{attempt}回試行）→ フォールバック")
+            return None
+        print(f"[jquants] 前場四本値 未反映 ({now_jst():%H:%M:%S} JST) → {interval_sec}秒後に再試行")
+        time.sleep(interval_sec)

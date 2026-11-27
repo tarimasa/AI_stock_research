@@ -21,6 +21,7 @@ load_dotenv()
 import backtest_logger
 import claude_analyzer
 import data_fetcher
+import jquants_fetcher
 import line_notifier
 import macro_preprocessor
 import news_fetcher
@@ -34,6 +35,21 @@ from master_manager import get_master
 
 # フルスキャンモード切り替えフラグ
 FULL_SCAN_ENABLED = os.environ.get("FULL_SCAN_ENABLED", "false").lower() == "true"
+DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
+
+# 昼レポートのタイミング制御（JST, "HH:MM"）
+#   NOON_AM_WAIT_UNTIL : J-Quants 前場四本値の反映をこの時刻まで待つ（過ぎたら yfinance で続行）
+#   NOON_DEADLINE      : この時刻を過ぎて起動した場合は後場寄付に間に合わないのでスキップ
+#   NOON_ENFORCE_DEADLINE=false で手動テスト時はスキップしない
+NOON_AM_WAIT_UNTIL = os.environ.get("NOON_AM_WAIT_UNTIL", "12:15")
+NOON_DEADLINE = os.environ.get("NOON_DEADLINE", "12:25")
+NOON_ENFORCE_DEADLINE = os.environ.get("NOON_ENFORCE_DEADLINE", "true").lower() == "true"
+NOON_AM_POLL_SEC = int(os.environ.get("NOON_AM_POLL_SEC", 60))
+
+
+def _jst_today_at(hhmm: str):
+    h, m = (int(x) for x in hhmm.split(":"))
+    return jquants_fetcher.now_jst().replace(hour=h, minute=m, second=0, microsecond=0)
 # 移行期間中の並行比較フラグ
 SCAN_COMPARE = os.environ.get("SCAN_COMPARE", "false").lower() == "true"
 # セクター集中上限（推奨+保有合計、1セクターあたり）
@@ -408,6 +424,18 @@ def run_noon_report() -> None:
       5. LINE 送信（「後場寄付向け」ヘッダー付き）
     """
     print("=== AI株式リサーチBot 起動（昼・後場寄付向け）===")
+
+    # GitHub Actions の schedule は数時間遅延することがある。
+    # 後場寄付（12:30）に間に合わない時刻に起動した場合は、誤ったタイミングの推奨を送らない。
+    now = jquants_fetcher.now_jst()
+    deadline = _jst_today_at(NOON_DEADLINE)
+    if NOON_ENFORCE_DEADLINE and now > deadline:
+        print(f"[noon] 起動 {now:%H:%M} JST が締切 {NOON_DEADLINE} を過ぎているためスキップ")
+        line_notifier.push_message([{
+            "type": "text",
+            "text": f"⏰ 昼レポートは起動遅延（{now:%H:%M} 起動）のため後場寄付に間に合わず、送信をスキップしました。",
+        }])
+        return
     print(f"[noon] モード: {'全銘柄スキャン' if FULL_SCAN_ENABLED else 'ウォッチリスト'}")
 
     # Step 1: 市場データ取得
@@ -446,9 +474,21 @@ def run_noon_report() -> None:
         )
         return
 
+    # Step 2.5: J-Quants 前場四本値の反映を待つ（反映され次第すぐ次へ）
+    am_bars = None
+    if not DRY_RUN and jquants_fetcher.is_available():
+        print(f"[noon] J-Quants 前場四本値の反映待ち（最大 {NOON_AM_WAIT_UNTIL} JST まで）...")
+        am_bars = jquants_fetcher.wait_for_morning_bars(
+            deadline=_jst_today_at(NOON_AM_WAIT_UNTIL),
+            interval_sec=NOON_AM_POLL_SEC,
+        )
+
     # Step 3: 前場メトリクスを付与して昼特化再スコア
     print("[noon] 前場メトリクス付与＆昼再スコア中...")
-    noon_candidates = noon_screener.apply_noon_filter(stage1)
+    noon_candidates = noon_screener.apply_noon_filter(stage1, am_bars=am_bars)
+    if noon_candidates:
+        src_count = sum(1 for c in noon_candidates if c.get("morning", {}).get("source") == "jquants_am")
+        print(f"[noon] 前場データソース: J-Quants {src_count}件 / yfinance {len(noon_candidates) - src_count}件")
 
     if not noon_candidates:
         print("[noon] 昼フィルタ通過銘柄なし。")

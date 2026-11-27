@@ -771,31 +771,40 @@ src/liff/
 
 ### 4-10. `.github/workflows/daily_report.yml`
 
-```yaml
-name: Daily Stock AI Report
+実ファイルが正。ここではスケジュール設計のみ記載する。
 
-on:
-  schedule:
-    - cron: '30 22 * * 0-4'  # 07:30 JST（8:30発注向け）※日〜木=月〜金
-    - cron: '30 02 * * 1-5'  # 11:30 JST（12:00発注向け）※月〜金
-  workflow_dispatch:           # 手動実行も可能
+| セッション | 起動 | 使うデータ | 締切 |
+|---|---|---|---|
+| 朝（前場寄付 9:00 向け） | cron `7 20 * * 0-4` = **05:07 JST** | 前日確定の日足のみ | なし（数時間の遅延を許容） |
+| 昼（後場寄付 12:30 向け） | **外部スケジューラ → workflow_dispatch（11:35 JST 推奨）**。cron `35 2 * * 1-5` はバックアップ | J-Quants 前場四本値 `/equities/bars/daily/am`（未取得銘柄は yfinance 15分足） | 12:25 JST を過ぎた起動は送信スキップ |
 
-jobs:
-  run-report:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: pip install -r requirements.txt
-      - run: python src/main.py
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-          AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+**背景:** GitHub Actions の `schedule` は起動保証がなく、2026/10〜11 の実績で 2〜9 時間遅延した
+（11:00 JST 予定の昼レポートが 16:00〜21:00 に到着）。朝は前日データしか使わないため早朝起動＋遅延許容で足りるが、
+昼は前場データ反映直後に動く必要があるため、時刻精度の高い外部スケジューラから起動する。
+
+**昼レポートの処理タイミング（`src/report.py` `run_noon_report`）:**
+
+1. 起動時刻が `NOON_DEADLINE`（既定 12:25 JST）を過ぎていれば「遅延のためスキップ」を LINE 通知して終了
+2. 市場データ取得・Stage1 スクリーニング（前日日足ベース、前場中でも実行可能）
+3. `jquants_fetcher.wait_for_morning_bars()` で前場四本値をポーリング（`NOON_AM_POLL_SEC`=60秒間隔）。
+   **当日の Date が返った時点で即座に次へ進む**。`NOON_AM_WAIT_UNTIL`（既定 12:15 JST）まで反映されなければ、
+   または 401/403（契約プラン外）なら yfinance 15分足にフォールバック
+4. 前場メトリクス付与 → Claude 分析 → LINE 送信
+
+**外部スケジューラの設定（例: Azure Logic Apps / cron-job.org など）:**
+
+平日 11:35 JST に以下を POST する（token は Actions: Read and write 権限の fine-grained PAT）。
+
 ```
+POST https://api.github.com/repos/<owner>/<repo>/actions/workflows/daily_report.yml/dispatches
+Authorization: Bearer <token>
+Accept: application/vnd.github+json
+
+{"ref": "main", "inputs": {"session": "noon"}}
+```
+
+設定後、リポジトリの Variables に `NOON_EXTERNAL_TRIGGER=true` を追加すると、バックアップ cron の昼起動は
+スキップされ二重送信を防げる。手動テストで締切を無視したい場合は `enforce_deadline=false` で実行する。
 
 -----
 
@@ -913,7 +922,7 @@ DRY_RUN=trueの場合はprint出力のみにしてください。
 ```
 src/main.pyとdaily_report.ymlを実装してください。
 ARCHITECTURE.mdの実行順序（Step2〜8）に従い呼び出します。
-cronは07:30 JSTと11:30 JSTの2回。エラー時はLINEにエラー通知を送ります。
+スケジュールは 4-10 の表を参照。エラー時はLINEにエラー通知を送ります。
 ```
 
 ### Step 10: LIFFフォーム ★追加

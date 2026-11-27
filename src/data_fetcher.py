@@ -142,20 +142,7 @@ def get_morning_session_metrics(ticker: str) -> dict:
     if morning_bars.empty:
         return {"error": "no morning bars"}
 
-    # 前日終値を日足から取得
-    prev_close = 0.0
-    try:
-        daily = fetch_ohlcv(ticker, days=3)
-        if not daily.empty:
-            # 今日の日付を除いた最新営業日の終値
-            daily_dates = [str(i)[:10] for i in daily.index]
-            prev_idx = [i for i, d in enumerate(daily_dates) if d != today_jst]
-            if prev_idx:
-                prev_close = float(daily["Close"].iloc[prev_idx[-1]])
-            else:
-                prev_close = float(daily["Close"].iloc[-1])
-    except Exception:
-        pass
+    prev_close = _fetch_prev_close(ticker, today_jst)
 
     open_9 = float(morning_bars["Open"].iloc[0])
     high = float(morning_bars["High"].max())
@@ -179,6 +166,53 @@ def get_morning_session_metrics(ticker: str) -> dict:
         "morning_return_pct": round(morning_return_pct, 2),
         "range_pct": round(range_pct, 2),
         "bars": int(len(morning_bars)),
+        "source": "yfinance_15m",
+    }
+
+
+def _fetch_prev_close(ticker: str, today_jst: str) -> float:
+    """当日を除いた最新営業日の終値（日足）。取得失敗時は 0.0。"""
+    try:
+        daily = fetch_ohlcv(ticker, days=3)
+        if not daily.empty:
+            daily_dates = [str(i)[:10] for i in daily.index]
+            prev_idx = [i for i, d in enumerate(daily_dates) if d != today_jst]
+            if prev_idx:
+                return float(daily["Close"].iloc[prev_idx[-1]])
+            return float(daily["Close"].iloc[-1])
+    except Exception:
+        pass
+    return 0.0
+
+
+def morning_metrics_from_am_bar(ticker: str, am_bar: dict) -> dict:
+    """
+    J-Quants 前場四本値（jquants_fetcher.fetch_morning_bars_today() の1銘柄分）から
+    get_morning_session_metrics() と同じ形式のメトリクスを作る。
+    """
+    open_9 = float(am_bar["open"])
+    high = float(am_bar["high"])
+    low = float(am_bar["low"])
+    close_1130 = float(am_bar["close"])
+    prev_close = _fetch_prev_close(ticker, am_bar["date"])
+
+    gap_pct = (open_9 - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
+    morning_return_pct = (close_1130 - open_9) / open_9 * 100 if open_9 > 0 else 0.0
+    range_pct = (high - low) / open_9 * 100 if open_9 > 0 else 0.0
+
+    return {
+        "date": am_bar["date"],
+        "prev_close": round(prev_close, 2) if prev_close else None,
+        "open_9": round(open_9, 2),
+        "high": round(high, 2),
+        "low": round(low, 2),
+        "close_1130": round(close_1130, 2),
+        "volume": int(am_bar.get("volume") or 0),
+        "gap_pct": round(gap_pct, 2),
+        "morning_return_pct": round(morning_return_pct, 2),
+        "range_pct": round(range_pct, 2),
+        "bars": 0,
+        "source": "jquants_am",
     }
 
 
