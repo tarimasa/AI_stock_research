@@ -4,7 +4,8 @@ noon_screener.py
 
 設計:
   1. 既存の Stage1 スクリーニング（日足ベース）を実行して候補を得る。
-  2. 候補各銘柄について本日前場（9:00〜11:30）の15分足を集計。
+  2. 候補各銘柄に本日前場（9:00〜11:30）の四本値を付与。
+     J-Quants 前場四本値（/equities/bars/daily/am）を優先し、未取得の銘柄は yfinance 15分足で集計。
   3. 昼特化シグナルを計算してスコアを再計算。
   4. 上位 N 件を返す → Claude に後場寄付推奨を生成させる。
 
@@ -19,14 +20,14 @@ noon_screener.py
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from data_fetcher import get_morning_session_metrics
+from data_fetcher import get_morning_session_metrics, morning_metrics_from_am_bar
 
 NOON_MAX_STOCKS = int(os.environ.get("NOON_MAX_STOCKS", 8))
 NOON_WORKERS = int(os.environ.get("NOON_WORKERS", 4))
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 
 
-def _calc_noon_signals(stock: dict) -> dict:
+def _calc_noon_signals(stock: dict, am_bars: dict | None = None) -> dict:
     """
     Stage1 候補 1 銘柄に前場メトリクスを付与して昼スコアを計算する。
 
@@ -44,7 +45,11 @@ def _calc_noon_signals(stock: dict) -> dict:
     code4 = raw_code.replace(".T", "")[:4]
     ticker = f"{code4}.T"
 
-    morning = get_morning_session_metrics(ticker)
+    # J-Quants 前場四本値（確定値）があれば優先、無ければ yfinance 15分足で集計
+    if am_bars and code4 in am_bars:
+        morning = morning_metrics_from_am_bar(ticker, am_bars[code4])
+    else:
+        morning = get_morning_session_metrics(ticker)
     if "error" in morning or not morning.get("open_9"):
         return None
 
@@ -131,12 +136,13 @@ def _calc_noon_signals(stock: dict) -> dict:
     return stock_out
 
 
-def apply_noon_filter(stage1_candidates: list[dict]) -> list[dict]:
+def apply_noon_filter(stage1_candidates: list[dict], am_bars: dict | None = None) -> list[dict]:
     """
     Stage1 通過候補に前場データを付与し、昼スコア上位 NOON_MAX_STOCKS 件を返す。
 
     Args:
         stage1_candidates: screener.run_full_scan() または screener.screen() の結果。
+        am_bars: jquants_fetcher.wait_for_morning_bars() の結果（None なら yfinance のみ）。
 
     Returns:
         昼スコア降順の上位候補（最大 NOON_MAX_STOCKS 件）。
@@ -149,7 +155,7 @@ def apply_noon_filter(stage1_candidates: list[dict]) -> list[dict]:
 
     with ThreadPoolExecutor(max_workers=NOON_WORKERS) as executor:
         futures = {
-            executor.submit(_calc_noon_signals, s): s for s in stage1_candidates
+            executor.submit(_calc_noon_signals, s, am_bars): s for s in stage1_candidates
         }
         for future in as_completed(futures):
             try:

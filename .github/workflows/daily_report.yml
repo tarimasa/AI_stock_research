@@ -2,11 +2,16 @@ name: Daily Stock AI Report
 
 on:
   schedule:
-    # GitHub Actions はスケジュール通りに起動する保証がなく、混雑時に30分〜2時間遅延することがある。
-    # ユーザーの発注可能窓: 7:00〜9:00 JST（朝）と 12:00〜13:00 JST（昼）の2回。
-    - cron: '30 21 * * 0-4'   # 06:30 JST / 朝:9:00 前場寄付向け（目標着信 7:00〜8:30）
-    - cron: '0 2 * * 1-5'     # 11:00 JST / 昼:12:30 後場寄付向け（目標着信 12:00〜12:30、前場引け後）
-  workflow_dispatch:           # 手動実行も可能
+    # GitHub Actions の schedule は起動保証がなく、実績で 2〜9 時間遅延している（2026/10〜11）。
+    # 朝: 前日確定データしか使わないため到着時刻に余裕を持たせ、早朝に起動して遅延を許容する。
+    # 昼: 前場四本値（J-Quants /equities/bars/daily/am）反映後すぐ実行したいので、
+    #     本命は外部スケジューラからの workflow_dispatch（ARCHITECTURE.md「昼レポートの起動」参照）。
+    #     下の cron はバックアップ。vars.NOON_EXTERNAL_TRIGGER=true にすると cron 起動はスキップされる。
+    #     遅延して 12:25 JST を過ぎた起動は src/report.py 側で送信スキップ。
+    # 分を 00/30 からずらしているのは、毎時ちょうどに起動が集中して遅延しやすいため。
+    - cron: '7 20 * * 0-4'    # 05:07 JST 月〜金 / 朝: 9:00 前場寄付向け
+    - cron: '35 2 * * 1-5'    # 11:35 JST 月〜金 / 昼: 12:30 後場寄付向け（バックアップ）
+  workflow_dispatch:           # 手動実行・外部スケジューラからの起動
     inputs:
       session:
         description: 'Session (morning or noon)'
@@ -16,6 +21,11 @@ on:
         options:
           - morning
           - noon
+      enforce_deadline:
+        description: '昼: 12:25 JST を過ぎた起動をスキップする（手動テスト時は false）'
+        required: false
+        default: true
+        type: boolean
 
 concurrency:
   group: daily-stock-report-${{ github.event.schedule || inputs.session || 'default' }}
@@ -24,7 +34,10 @@ concurrency:
 jobs:
   run-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 外部トリガー運用時は cron の昼起動をスキップ（二重送信防止）
+    if: ${{ !(github.event.schedule == '35 2 * * 1-5' && vars.NOON_EXTERNAL_TRIGGER == 'true') }}
+    # 昼は前場四本値の反映待ち（最大 ~40 分）を含むため余裕を持たせる
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
@@ -162,7 +175,7 @@ jobs:
       - name: Resolve session
         id: session
         run: |
-          if [ "${{ github.event.schedule }}" = "0 2 * * 1-5" ]; then
+          if [ "${{ github.event.schedule }}" = "35 2 * * 1-5" ]; then
             echo "value=noon" >> "$GITHUB_OUTPUT"
           elif [ -n "${{ inputs.session }}" ]; then
             echo "value=${{ inputs.session }}" >> "$GITHUB_OUTPUT"
@@ -181,6 +194,7 @@ jobs:
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
           DRY_RUN: 'false'
           SESSION: ${{ steps.session.outputs.value }}
+          NOON_ENFORCE_DEADLINE: ${{ github.event_name != 'workflow_dispatch' || inputs.enforce_deadline }}
           MAX_STOCKS_TO_ANALYZE: '10'
           # フルスキャンモード: GitHub Variables で FULL_SCAN_ENABLED=true に設定して有効化
           FULL_SCAN_ENABLED: ${{ vars.FULL_SCAN_ENABLED || 'false' }}
